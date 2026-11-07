@@ -1,0 +1,25 @@
+{
+  "id": "soda",
+  "name": "Soda",
+  "version": "0.2.0",
+  "minAppVersion": "0.1.18",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": {
+    "network": [
+      "beta-luna.douyin.com",
+      "api.qishui.com"
+    ]
+  },
+  "navigation": [
+    {
+      "title": "发现音乐",
+      "builtin": "home"
+    },
+    {
+      "title": "音乐分类",
+      "page": "categories",
+      "icon": "note"
+    }
+  ]
+}

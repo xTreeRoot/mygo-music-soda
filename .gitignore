@@ -1,0 +1,13 @@
+/dist/
+/node_modules/
+/runtime/
+/storage.json
+/settings.json
+*.log
+
+# Private workspace records are not part of the public project.
+/TODO.md
+/DECISIONS.md
+/REVIEW.md
+/.env
+/.env.*
