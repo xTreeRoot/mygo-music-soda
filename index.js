@@ -79,7 +79,7 @@ export async function home() {
   const first = await playlist({ id: playlists[0].id });
   if (first.tracks.length) sections.push({ title: first.name, tracks: first.tracks.slice(0, 12) });
   return {
-    title: 'Soda',
+    title: '汽水音乐',
     subtitle: '公开歌单 · 原生 AAC 播放',
     sections,
   };
@@ -148,6 +148,8 @@ export async function stream({ id, quality }) {
     url: selected.main_url,
     type: selected.video_meta.vtype === 'aac' ? 'aac' : 'm4a',
     size: Number(selected.video_meta.size || 0),
+    bitRate: Number(selected.video_meta.bitrate || 0),
+    quality: quality === 'standard' ? 'standard' : 'high',
     headers: { 'User-Agent': WEB_UA },
   };
 }
@@ -223,160 +225,4 @@ export async function browse({ page }) {
     return { title: category?.title || '分类音乐', subtitle: category?.subtitle || '', sections: [{ tracks }] };
   }
   throw fail('没有这个页面');
-}
-
-const PASSPORT = 'https://api.qishui.com';
-const AUTH_QUERY = 'passport_jssdk_version=2.4.13&passport_jssdk_type=normal&is_from_ttaccountsdk=1&aid=386088';
-let loginEpoch = 0;
-let accountCheckedAt = 0;
-
-function loginError(message, expired = false) {
-  const error = new Error(message);
-  if (expired) error.code = 'signIn';
-  return error;
-}
-
-function cookieHeader(cookies) {
-  return Object.entries(cookies).map(([name, value]) => name + '=' + value).join('; ');
-}
-
-async function passport(path, cookies, form) {
-  const stage = path.startsWith('/passport/web/get_qrcode/') ? '生成二维码'
-    : path.startsWith('/passport/web/check_qrconnect/') ? '查询扫码状态' : '验证登录账号';
-  const csrf = cookies.passport_csrf_token || cookies.passport_csrf_token_default;
-  let response;
-  try {
-    response = await fetch(PASSPORT + path, {
-      method: form ? 'POST' : 'GET',
-      redirect: 'error',
-      signal: AbortSignal.timeout(15000),
-      headers: {
-        'User-Agent': WEB_UA,
-        Accept: 'application/json, text/javascript',
-        ...(csrf ? { 'x-tt-passport-csrf-token': csrf } : {}),
-        Origin: 'https://www.qishui.com',
-        Referer: 'https://www.qishui.com/',
-        ...(Object.keys(cookies).length ? { Cookie: cookieHeader(cookies) } : {}),
-        ...(form ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
-      },
-      ...(form ? { body: new URLSearchParams(form).toString() } : {}),
-    });
-  } catch (_) {
-    throw loginError(stage + '失败：无法连接汽水账号服务，请检查网络后重试');
-  }
-  if (!response.ok) throw loginError(stage + '失败（HTTP ' + response.status + '），请稍后重试', response.status === 401);
-  for (const line of response.headers.getSetCookie()) {
-    const pair = line.split(';', 1)[0];
-    const equal = pair.indexOf('=');
-    if (equal <= 0) continue;
-    const name = pair.slice(0, equal).trim();
-    if (!/^[A-Za-z0-9_-]+$/.test(name) || ['__proto__', 'constructor', 'prototype'].includes(name)) continue;
-    if (/;\s*max-age=0(?:;|$)/i.test(line)) delete cookies[name];
-    else cookies[name] = pair.slice(equal + 1);
-  }
-  let result;
-  try {
-    const text = await response.text();
-    // Account identifiers may be larger than JavaScript's exact integer range.
-    result = JSON.parse(text.replace(/("user_id"\s*:\s*)(\d+)(?=\s*[,}])/g, '$1"$2"'));
-  } catch (_) {
-    throw loginError(stage + '失败：汽水账号服务没有返回有效数据，请稍后重试');
-  }
-  if (!result || typeof result !== 'object') throw loginError(stage + '失败：账号服务响应格式无效');
-  const data = result.data || result;
-  const code = Number(data.error_code || result.error_code || 0);
-  if (code === 13) throw loginError('汽水登录已过期，请重新扫码', true);
-  if (code === 2046) throw loginError('汽水要求额外验证，请先在官方客户端完成验证，再重新扫码');
-  if (code || result.message === 'error') {
-    const detail = Number.isSafeInteger(code) && code !== 0 ? '服务码 ' + code : '服务未提供错误码';
-    throw loginError(stage + '失败（' + detail + '）。请保留此提示，勿反复扫码');
-  }
-  return data;
-}
-
-async function profile(cookies) {
-  const data = await passport('/passport/account/info/v2/?' + AUTH_QUERY, cookies);
-  const id = String(data.user_id || '');
-  if (!/^\d+$/.test(id) || /^0+$/.test(id)) throw loginError('汽水账号服务未确认登录，请重新扫码', true);
-  return {
-    id,
-    name: data.screen_name || data.nickname || data.name || 'Soda 用户',
-    imageUrl: image(data.avatar_url || data.avatar),
-  };
-}
-
-export async function account() {
-  const epoch = loginEpoch;
-  const session = host.storage.get('session');
-  if (!session?.cookies || !session.profile) return null;
-  if (Date.now() - accountCheckedAt < 60000) return session.profile;
-  try {
-    const user = await profile(session.cookies);
-    if (epoch !== loginEpoch) return null;
-    host.storage.set('session', { cookies: session.cookies, profile: user });
-    accountCheckedAt = Date.now();
-    return user;
-  } catch (error) {
-    if (epoch === loginEpoch && error.code === 'signIn') {
-      host.storage.remove('session');
-      accountCheckedAt = 0;
-      return null;
-    }
-    throw error;
-  }
-}
-
-export async function signIn() {
-  if (!['darwin', 'windows'].includes(host.platform)) throw loginError('Soda 扫码登录目前仅支持 macOS 和 Windows，公开内容仍可使用');
-  const epoch = ++loginEpoch;
-  const cookies = Object.create(null);
-  host.signInPrompt({ text: '正在生成汽水音乐登录二维码…' });
-  const data = await passport('/passport/web/get_qrcode/?' + AUTH_QUERY + '&next=https%3A%2F%2Fapi.qishui.com&need_logo=false&need_short_url=false&is_new_login=1', cookies);
-  if (epoch !== loginEpoch) throw loginError('登录已取消');
-  let source;
-  try { source = new URL(data.qrcode_index_url); }
-  catch (_) { throw loginError('汽水音乐没有返回有效登录二维码'); }
-  const qrToken = source.searchParams.get('token');
-  if (source.protocol !== 'https:' || source.hostname !== 'bff-pc.qishui.com' || !qrToken || !data.token) {
-    throw loginError('汽水音乐没有返回有效登录二维码');
-  }
-  // The official desktop client wraps the SDK token in Soda's mobile scan page.
-  const qr = new URL('https://bff-pc.qishui.com/light/invoke/scan_login');
-  qr.searchParams.set('token', qrToken);
-  qr.searchParams.set('os', host.platform === 'darwin' ? 'Mac' : 'Windows');
-  qr.searchParams.set('computer_name', 'Soda');
-  host.signInPrompt({ qr: qr.toString(), text: '请打开汽水音乐 App 扫一扫，并在手机上确认登录' });
-  const expiry = Number(data.expire_time || 0);
-  const expiresAt = expiry > 1e12 ? expiry : expiry > 1e9 ? expiry * 1000 : Date.now() + (expiry || 180) * 1000;
-  const deadline = Math.min(Date.now() + 180000, expiresAt);
-  while (Date.now() < deadline && epoch === loginEpoch) {
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    if (epoch !== loginEpoch) break;
-    const state = await passport('/passport/web/check_qrconnect/?' + AUTH_QUERY, cookies, {
-      need_logo: 'false', need_short_url: 'false', is_frontier: 'true', token: data.token, is_new_login: '1', next: PASSPORT,
-    });
-    if (epoch !== loginEpoch) break;
-    const status = String(state.status || '');
-    if (['4', '5', 'refused', 'expired', 'cancelled'].includes(status)) {
-      throw loginError('二维码已失效或登录已取消，请重新扫码');
-    }
-    if (['2', 'scanned'].includes(status)) host.signInPrompt({ qr: qr.toString(), text: '已扫码，请在汽水音乐 App 中确认登录' });
-    if (['3', 'confirmed'].includes(status)) {
-      if (!cookies.sessionid && !cookies.sessionid_ss) throw loginError('扫码已确认，但汽水未返回可用会话，请重新登录');
-      host.signInPrompt({ text: '扫码已确认，正在核验账号…' });
-      const user = await profile(cookies);
-      if (epoch !== loginEpoch) break;
-      host.storage.set('session', { cookies, profile: user });
-      accountCheckedAt = Date.now();
-      host.signInPrompt({ text: '登录成功' });
-      return user;
-    }
-  }
-  throw loginError(epoch !== loginEpoch ? '登录已取消' : '二维码已过期，请重新扫码');
-}
-
-export function signOut() {
-  loginEpoch++;
-  accountCheckedAt = 0;
-  host.storage.remove('session');
 }

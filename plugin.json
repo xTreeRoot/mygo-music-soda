@@ -1,14 +1,14 @@
 {
   "id": "soda",
-  "name": "Soda",
-  "version": "0.2.0",
-  "minAppVersion": "0.1.18",
+  "name": "汽水音乐",
+  "version": "0.2.1",
+  "minAppVersion": "0.1.21",
   "main": "index.js",
   "playback": "stream",
   "permissions": {
     "network": [
       "beta-luna.douyin.com",
-      "api.qishui.com"
+      "*.douyinvod.com"
     ]
   },
   "navigation": [
