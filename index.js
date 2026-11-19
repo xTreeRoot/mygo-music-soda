@@ -130,7 +130,7 @@ async function detail(id) {
 export async function stream({ id, quality }) {
   const data = await detail(id);
   let model;
-  try { model = JSON.parse(data.track_player?.video_model || '{}'); }
+  try { model = JSON.parse(data.track_player?.video_model || '{}') || {}; }
   catch (_) { throw fail('汽水音乐返回了无效的播放信息'); }
   const fullDuration = Number(data.seo_track?.track?.duration || 0);
   const availableDuration = Number(model.video_duration || 0) * 1000;
@@ -138,8 +138,10 @@ export async function stream({ id, quality }) {
     throw fail('这首歌当前只提供试听片段，请在汽水音乐客户端中播放');
   }
   const variants = Object.values(model.video_list || {}).filter(v => {
-    const meta = v.video_meta || {};
-    return meta.codec_type === 'aac' && /^https:\/\/[^/]+\.douyinvod\.com\//.test(v.main_url || '');
+    const meta = v?.video_meta || {};
+    const url = v?.main_url;
+    return meta.codec_type === 'aac' && ['aac', 'm4a'].includes(meta.vtype) &&
+      typeof url === 'string' && /^https:\/\/(?:[a-z0-9-]+\.)+douyinvod\.com\//i.test(url) && !/[\x00-\x20\x7f\\]/.test(url);
   });
   variants.sort((a, b) => Number(a.video_meta.bitrate || 0) - Number(b.video_meta.bitrate || 0));
   if (!variants.length) throw fail('这首歌暂时没有可用的 AAC 音频');

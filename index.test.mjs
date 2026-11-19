@@ -44,3 +44,17 @@ test('failed requests are not cached and numeric identifiers are validated befor
   globalThis.fetch = fetchWorking;
   assert.ok((await plugin.stream({ id: '123' })).url);
 });
+
+test('video_model is not a video capability and only native AAC reaches the player', async () => {
+  const preferred = variant(128000);
+  const { plugin } = await setup({ video_duration: 180, video_list: {
+    muxed: { ...variant(1000000), video_meta: { codec_type: 'aac', vtype: 'mp4', bitrate: 1000000 } },
+    credentialed: { ...variant(256000), main_url: 'https://name@v1.douyinvod.com/wrong' },
+    unsafe: { ...variant(256000), main_url: 'https://outside.test\\@v1.douyinvod.com/wrong' },
+    preferred,
+  } });
+  const audio = await plugin.stream({ id: '123' });
+  assert.equal(audio.url, preferred.main_url);
+  assert.equal(plugin.video, undefined);
+  assert.equal(plugin.signIn, undefined);
+});
