@@ -113,7 +113,7 @@ async function accountFetch(address, jar, { signal, body, headers } = {}) {
   try {
     response = await fetch(address, {
       method: body == null ? 'GET' : 'POST', body, redirect: 'manual', signal: controller.signal,
-      headers: { 'User-Agent': 'LunaPC/3.0.0(290101097)', Accept: 'application/json', ...headers, ...(cookie ? { Cookie: cookie } : {}) },
+      headers: { 'User-Agent': target.pathname.startsWith('/passport/') ? WEB_UA : 'LunaPC/3.0.0(290101097)', Accept: 'application/json', ...headers, ...(cookie ? { Cookie: cookie } : {}) },
     });
     text = await response.text();
   } catch {
@@ -207,14 +207,9 @@ async function readLogin(attempt, read, recover = () => {}) {
   }
 }
 
+// 对齐 qishui-api 的汽水 Passport 合同，避免混入其他客户端的设备与 SDK 参数。
 function passportQuery() {
-  const trace = String(Math.floor(Math.random() * 0x100000000).toString(16)).padStart(8, '0');
-  return {
-    aid: APP_ID, passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1',
-    language: 'zh', account_sdk_source: 'web', p_js_v: '2.4.13', p_js_t: 'pro', p_zt: '3.3.5', p_ver: '1.0.29',
-    request_host: 'app%3A%2F%2Fresources', p_bd: '1.0.0.41', is_new_login: '1', is_from_iesaccountsaas: '1',
-    device_platform: 'PC', version_code: '3.5.2', account_sdk_source_info: '00', biz_trace_id: trace,
-  };
+  return { aid: APP_ID, passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1' };
 }
 
 async function completeRedirect(address, jar, signal) {
@@ -231,10 +226,8 @@ async function scanQR(attempt, jar) {
   const extra = { next: ACCOUNT_API, need_logo: 'false', need_short_url: 'false', is_new_login: '1' };
   const requestQR = (path, body) => {
     const query = passportQuery();
-    const headers = { 'x-tt-passport-trace-id': query.biz_trace_id };
-    if (body != null) Object.assign(headers, {
-      'Content-Type': 'application/x-www-form-urlencoded', 'x-ss-stub': host.crypto.md5(body).toUpperCase(),
-    });
+    const headers = body == null ? {} : { 'Content-Type': 'application/x-www-form-urlencoded' };
+    if (body != null) query.iid = '27960026095955';
     return accountRequest(path, body == null ? { ...query, ...extra } : query, jar, { signal, body, headers });
   };
   host.signInPrompt({ text: '正在生成汽水音乐登录二维码…' });
@@ -246,7 +239,7 @@ async function scanQR(attempt, jar) {
   const prompt = text => host.signInPrompt({ qr: qr.qrcode_index_url, text });
   prompt('请用汽水音乐 App 扫码，再在手机上确认');
   const until = Date.now() + LOGIN_MS;
-  const form = String(new URLSearchParams({ ...extra, token: qr.token, is_frontier: String(qr.is_frontier === true) }));
+  const form = String(new URLSearchParams({ ...extra, token: qr.token, is_frontier: 'true' }));
   while (Date.now() < until) {
     await pollDelay(signal);
     checkLogin(attempt);

@@ -177,17 +177,33 @@ test('QR waits for confirmation, validates an exact account ID and scopes the st
     assert.equal(url.origin, accountOrigin);
     assert.equal(new URLSearchParams(options.body).get('token'), 'fixture-ticket');
     assert.equal(options.headers.Cookie, 'passport_csrf_token=fixture-csrf');
-    assert.equal(options.headers['x-ss-stub'], createHash('md5').update(options.body).digest('hex').toUpperCase());
+    assert.equal(options.method, 'POST');
+    assert.match(options.headers['User-Agent'], /^Mozilla\/5\.0 /);
+    assert.equal(options.headers['Content-Type'], 'application/x-www-form-urlencoded');
+    assert.deepEqual(Object.fromEntries(url.searchParams), {
+      aid: '386088', passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1', iid: '27960026095955',
+    });
+    assert.deepEqual(Object.fromEntries(new URLSearchParams(options.body)), {
+      next: accountOrigin, need_logo: 'false', need_short_url: 'false', is_new_login: '1', token: 'fixture-ticket', is_frontier: 'true',
+    });
     return ++polls === 1 ? response({ message: 'success', data: { status: 'scanned' } }) : confirm();
   });
   const plugin = await import(`./index.js?test=${++sequence}`);
   const profile = await plugin.signIn();
+  const create = requests[0];
+  assert.equal(create.options.method, 'GET');
+  assert.match(create.options.headers['User-Agent'], /^Mozilla\/5\.0 /);
+  assert.deepEqual(Object.fromEntries(create.url.searchParams), {
+    aid: '386088', passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1',
+    next: accountOrigin, need_logo: 'false', need_short_url: 'false', is_new_login: '1',
+  });
   assert.equal(profile.id, fixtureAccount);
   assert.equal(profile.name, `汽水测试 ${fixtureAccount}`);
   assert.equal(profile.page, 'my-library');
   assert.equal(prompts.filter(prompt => prompt.qr === fixtureQR).length, 2);
   assert.deepEqual(requests.map(item => item.url.pathname), [qrPath, pollPath, pollPath, mePath]);
   assert.equal(requests.at(-1).options.headers.Cookie, 'sessionid=fixture-session');
+  assert.equal(requests.at(-1).options.headers['User-Agent'], 'LunaPC/3.0.0(290101097)');
   assert.deepEqual(storage.get('qishuiAccount').cookies.map(item => item.name), ['sessionid']);
 });
 
@@ -262,7 +278,7 @@ test('cancelling recovery prevents another request or saving late account data',
 
 test('HTTP refusals, verification challenges and malformed data are never retried', async context => {
   fastPolling(context);
-  for (const result of [response({}, { status: 503 }), response({ status_code: 2046 }), response('broken JSON')]) {
+  for (const result of [response({}, { status: 503 }), response({ status_code: 2046 }), response({ message: 'error', data: { error_code: 2156 } }), response('broken JSON')]) {
     const { requests, storage, reply } = accountFixture();
     reply.set(pollPath, () => result);
     const plugin = await import(`./index.js?test=${++sequence}`);
