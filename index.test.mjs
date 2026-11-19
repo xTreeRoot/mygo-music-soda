@@ -14,13 +14,33 @@ async function setup(model = { video_duration: 180, video_list: { low: variant(6
 }
 
 test('lossless requests degrade to available native AAC; standard chooses a lower bitrate', async () => {
-  const { plugin, requests } = await setup();
-  const high = await plugin.stream({ id: '123', quality: 'lossless' });
+  const raw = variant(64000);
+  const { plugin, requests } = await setup({ video_duration: 180, video_list: {
+    low: { ...raw, video_meta: { ...raw.video_meta, vtype: 'aac' } }, high: variant(128000),
+  } });
+  const [high, standard] = await Promise.all([
+    plugin.stream({ id: '123', quality: 'lossless' }),
+    plugin.stream({ id: '123', quality: 'standard' }),
+  ]);
   assert.equal(high.type, 'm4a');
   assert.equal(high.bitRate, 128000);
   assert.equal(high.quality, 'high');
-  assert.equal((await plugin.stream({ id: '123', quality: 'standard' })).bitRate, 64000);
+  assert.equal(standard.type, 'aac');
+  assert.equal(standard.bitRate, 64000);
   assert.equal(requests.length, 1);
+});
+
+test('each new media resolution can replace an expired URL without invalidating lyrics', async () => {
+  const model = { video_duration: 180, video_list: { high: variant(128000) } };
+  const { plugin, requests } = await setup(model);
+  const input = { id: '123' };
+  const first = await plugin.stream(input);
+  await plugin.lyrics(input);
+  assert.equal(requests.length, 1);
+  model.video_list.high.main_url += '?renewed=1';
+  assert.equal((await plugin.stream(input)).url, `${first.url}?renewed=1`);
+  await plugin.lyrics(input);
+  assert.equal(requests.length, 2);
 });
 
 test('preview-only media is rejected rather than presented as a complete song', async () => {

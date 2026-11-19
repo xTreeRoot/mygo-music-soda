@@ -1,6 +1,7 @@
 const API = 'https://beta-luna.douyin.com';
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
-const details = new Map();
+const pendingDetails = new Map();
+const lyricsCache = new Map();
 const ACCOUNT_API = 'https://api.qishui.com';
 const QR_ORIGIN = 'https://bff-pc.qishui.com';
 const APP_ID = '386088';
@@ -524,16 +525,18 @@ export async function playlist({ id }) {
 async function detail(id) {
   id = String(id);
   if (!/^\d+$/.test(id)) throw fail('歌曲 ID 无效');
-  const cached = details.get(id);
-  if (cached && cached.until > Date.now()) return cached.promise;
-  const entry = {
-    until: Date.now() + 60000,
-    promise: request('/luna/h5/seo_track?track_id=' + encodeURIComponent(id) + '&device_platform=web'),
-  };
-  if (details.size >= 32) details.delete(details.keys().next().value);
-  details.set(id, entry);
-  try { return await entry.promise; }
-  catch (error) { if (details.get(id) === entry) details.delete(id); throw error; }
+  const pending = pendingDetails.get(id);
+  if (pending) return pending;
+  const loading = request('/luna/h5/seo_track?track_id=' + encodeURIComponent(id) + '&device_platform=web');
+  pendingDetails.set(id, loading);
+  try {
+    const data = await loading;
+    if (lyricsCache.size >= 32 && !lyricsCache.has(id)) lyricsCache.delete(lyricsCache.keys().next().value);
+    lyricsCache.set(id, { content: data.lyric?.content || '', until: Date.now() + 60000 });
+    return data;
+  } finally {
+    pendingDetails.delete(id);
+  }
 }
 
 export async function stream({ id, quality }) {
@@ -566,8 +569,8 @@ export async function stream({ id, quality }) {
 }
 
 export async function lyrics({ id }) {
-  const data = await detail(id);
-  const content = data.lyric?.content || '';
+  const cached = lyricsCache.get(String(id));
+  const content = cached?.until > Date.now() ? cached.content : (await detail(id)).lyric?.content || '';
   const lines = [];
   for (const raw of content.split('\n')) {
     const header = /^\[(\d+),(\d+)\](.*)$/.exec(raw);
