@@ -1,11 +1,406 @@
 const API = 'https://beta-luna.douyin.com';
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
 const details = new Map();
+const ACCOUNT_API = 'https://api.qishui.com';
+const QR_ORIGIN = 'https://bff-pc.qishui.com';
+const APP_ID = '386088';
+const LOGIN_PAGE = 'my-library';
+const SESSION_KEY = 'qishuiAccount';
+const SESSION_COOKIES = new Set(['sessionid', 'sessionid_ss', 'sid_guard', 'sid_tt']);
+const LIBRARY_PATH = '/luna/pc/me/playlist';
+const PRIVATE_DETAIL_PATH = '/luna/pc/playlist/detail';
+const ACCOUNT_PATH = '/luna/pc/me';
+const ALLOWED_HOSTS = new Set(['api.qishui.com', 'bff-pc.qishui.com']);
+const NO_SESSION = 1000016;
+const SECURITY_CHECK = 2046;
+const POLL_MS = 2000;
+const LOGIN_MS = 210000;
+const PAGE_SIZE = 50;
+let loginAttempt;
+let accountRevision = 0;
 
 function fail(message) {
   const error = new Error(message);
   error.code = 'unavailable';
   return error;
+}
+
+function accountError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+function loginRequired() {
+  return accountError('signIn', '请先登录汽水音乐');
+}
+
+function accountID(value) {
+  if (typeof value !== 'string' && !Number.isSafeInteger(value)) return '';
+  return /^\d{1,32}$/.test(String(value)) ? String(value) : '';
+}
+
+function parseAccountJSON(text) {
+  if (text.length > 2 * 1024 * 1024) throw fail('汽水音乐返回的数据过大');
+  return JSON.parse(text.replace(/"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g, token => /^\d{16,}$/.test(token) ? `"${token}"` : token));
+}
+
+function authTarget(address) {
+  if (typeof address !== 'string' || address.length > 16384 || !/^https:\/\/(api|bff-pc)\.qishui\.com(?:\/|\?|$)/.test(address) || /[\\\s\u0000-\u001f\u007f]/.test(address)) {
+    throw fail('汽水音乐登录地址无效');
+  }
+  return new URL(address);
+}
+
+function cookiePathMatches(path, scope) {
+  return path === scope || path.startsWith(scope.endsWith('/') ? scope : scope + '/');
+}
+
+function cookieValue(value) {
+  return typeof value === 'string' && /^[\x21-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+$/.test(value);
+}
+
+function cookieApplies(cookie, path) {
+  return cookie && /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(cookie.name) && cookieValue(cookie.value) &&
+    (cookie.domain === 'api.qishui.com' || cookie.domain === 'qishui.com') &&
+    (cookie.expires == null || cookie.expires > Date.now()) && typeof cookie.path === 'string' && cookiePathMatches(path, cookie.path);
+}
+
+function sessionPresent(jar) {
+  return jar.some(cookie => cookieApplies(cookie, ACCOUNT_PATH) && SESSION_COOKIES.has(cookie.name));
+}
+
+function updateCookies(jar, lines, target) {
+  if (!Array.isArray(lines) || lines.length > 64 || !ALLOWED_HOSTS.has(target.hostname)) return;
+  for (const line of lines) {
+    if (typeof line !== 'string' || line.length > 8192) continue;
+    const [pair, ...parts] = line.split(';');
+    const split = pair.indexOf('=');
+    const name = pair.slice(0, split).trim();
+    const value = pair.slice(split + 1).trim();
+    if (split < 1 || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) continue;
+    const attributes = Object.fromEntries(parts.map(part => {
+      const equals = part.indexOf('=');
+      return equals < 0 ? [part.trim().toLowerCase(), ''] : [part.slice(0, equals).trim().toLowerCase(), part.slice(equals + 1).trim()];
+    }));
+    const domain = attributes.domain?.toLowerCase().replace(/^\./, '') || target.hostname;
+    if ((domain !== 'api.qishui.com' && domain !== 'qishui.com') || (target.hostname !== domain && !target.hostname.endsWith('.' + domain))) continue;
+    const path = attributes.path?.startsWith('/') ? attributes.path : (target.pathname.replace(/\/[^/]*$/, '') || '/');
+    const age = attributes['max-age'];
+    const expires = /^-?\d+$/.test(age || '') ? Date.now() + Number(age) * 1000 : Date.parse(attributes.expires);
+    const previous = jar.findIndex(cookie => cookie.name === name && cookie.path === path && cookie.domain === domain);
+    if (!cookieValue(value) || expires <= Date.now()) {
+      if (previous >= 0) jar.splice(previous, 1);
+      continue;
+    }
+    const cookie = { name, value, path, domain, ...(Number.isFinite(expires) ? { expires } : {}) };
+    if (previous >= 0) jar[previous] = cookie;
+    else if (jar.length < 128) jar.push(cookie);
+  }
+}
+
+async function accountFetch(address, jar, { signal, body, headers } = {}) {
+  const target = authTarget(address);
+  const cookies = target.origin === ACCOUNT_API ? jar.filter(cookie => cookieApplies(cookie, target.pathname)) : [];
+  const cookie = cookies.sort((left, right) => right.path.length - left.path.length).map(value => `${value.name}=${value.value}`).join('; ');
+  if (cookie.length > 65536) throw loginRequired();
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (signal?.aborted) cancel();
+  signal?.addEventListener('abort', cancel, { once: true });
+  const timer = setTimeout(cancel, 12000);
+  let response;
+  let text;
+  try {
+    response = await fetch(address, {
+      method: body == null ? 'GET' : 'POST', body, redirect: 'manual', signal: controller.signal,
+      headers: { 'User-Agent': 'LunaPC/3.0.0(290101097)', Accept: 'application/json', ...headers, ...(cookie ? { Cookie: cookie } : {}) },
+    });
+    text = await response.text();
+  } catch {
+    if (signal?.aborted) throw accountError('cancelled', '汽水登录已取消');
+    throw accountError('network', '无法连接汽水音乐，请检查网络后重试');
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', cancel);
+  }
+  if (signal?.aborted) throw accountError('cancelled', '汽水登录已取消');
+  if (response.status === 401) throw loginRequired();
+  if (response.status === 429) throw accountError('rateLimit', '汽水请求过于频繁，请稍后重试');
+  updateCookies(jar, response.headers.getSetCookie?.() || [], response.url ? authTarget(response.url) : target);
+  return { status: response.status, location: response.headers.get('location'), body: text };
+}
+
+async function accountRequest(path, query, jar, options) {
+  const response = await accountFetch(ACCOUNT_API + path + '?' + new URLSearchParams(query), jar, options);
+  if (response.status !== 200) throw fail(`汽水音乐账号请求失败：HTTP ${response.status}`);
+  let data;
+  try { data = parseAccountJSON(response.body); } catch { throw fail('汽水音乐账号响应格式无效'); }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw fail('汽水音乐账号响应格式无效');
+  const codes = [data.status_code, data.status_info?.status_code, data.status_info?.code, data.error_code, data.data?.error_code].map(Number);
+  if (codes.includes(NO_SESSION)) throw loginRequired();
+  if (codes.includes(SECURITY_CHECK)) throw accountError('verify', '汽水音乐要求额外安全验证，请先在官方 App 完成验证后重试');
+  if (codes.includes(7)) throw accountError('rateLimit', '汽水请求过于频繁，请稍后重试');
+  if (path.startsWith('/passport/') && codes.includes(2)) throw accountError('expired', '汽水二维码已过期，请重新扫码');
+  if (codes.some(code => Number.isFinite(code) && code !== 0) || (path.startsWith('/passport/') && data.message !== 'success')) {
+    throw fail('汽水音乐拒绝了本次请求');
+  }
+  return data;
+}
+
+function storedAccount() {
+  const stored = globalThis.host?.storage?.get(SESSION_KEY);
+  return stored?.version === 1 && accountID(stored.id) && Array.isArray(stored.cookies) && stored.cookies.length <= 128 ? stored : null;
+}
+
+function saveAccount(profile, cookies, active) {
+  const forLibrary = cookies.filter(cookie => !cookie.name.startsWith('passport_csrf_') &&
+    [ACCOUNT_PATH, LIBRARY_PATH, PRIVATE_DETAIL_PATH].some(path => cookieApplies(cookie, path)));
+  host.storage.set(SESSION_KEY, { version: 1, id: profile.id, cookies: forLibrary, active });
+}
+
+async function verifiedProfile(jar, signal) {
+  if (!sessionPresent(jar)) throw loginRequired();
+  const payload = await accountRequest(ACCOUNT_PATH, { aid: APP_ID }, jar, { signal });
+  const raw = payload.my_info || payload.user;
+  const id = accountID(raw?.id);
+  if (!sessionPresent(jar)) throw loginRequired();
+  if (!id) throw fail('汽水音乐未返回有效账号');
+  const name = [raw.nickname, raw.public_name].find(value => typeof value === 'string' && value.trim()) || '汽水音乐用户';
+  const imageUrl = [raw.avatar_url, raw.larger_avatar_url, raw.medium_avatar_url, raw.thumb_avatar_url, raw.url_avatar].map(image).find(Boolean);
+  return { id, name, imageUrl, page: LOGIN_PAGE };
+}
+
+function checkLogin(attempt) {
+  if (attempt !== loginAttempt || attempt.controller.signal.aborted) throw accountError('cancelled', '汽水登录已取消');
+}
+
+function pollDelay(signal) {
+  return new Promise(resolve => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, POLL_MS);
+    signal.addEventListener('abort', finish, { once: true });
+  });
+}
+
+function passportQuery() {
+  const trace = String(Math.floor(Math.random() * 0x100000000).toString(16)).padStart(8, '0');
+  return {
+    aid: APP_ID, passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1',
+    language: 'zh', account_sdk_source: 'web', p_js_v: '2.4.13', p_js_t: 'pro', p_zt: '3.3.5', p_ver: '1.0.29',
+    request_host: 'app%3A%2F%2Fresources', p_bd: '1.0.0.41', is_new_login: '1', is_from_iesaccountsaas: '1',
+    device_platform: 'PC', version_code: '3.5.2', account_sdk_source_info: '00', biz_trace_id: trace,
+  };
+}
+
+async function completeRedirect(address, jar, signal) {
+  for (let hop = 0; address && hop < 5; hop++) {
+    const result = await accountFetch(address, jar, { signal });
+    if (sessionPresent(jar)) return;
+    if (![301, 302, 303, 307, 308].includes(result.status) || !result.location) break;
+    address = new URL(result.location, address).href;
+  }
+}
+
+async function scanQR(attempt, jar) {
+  const { signal } = attempt.controller;
+  const extra = { next: ACCOUNT_API, need_logo: 'false', need_short_url: 'false', is_new_login: '1' };
+  const requestQR = (path, body) => {
+    const query = passportQuery();
+    const headers = { 'x-tt-passport-trace-id': query.biz_trace_id };
+    if (body != null) Object.assign(headers, {
+      'Content-Type': 'application/x-www-form-urlencoded', 'x-ss-stub': host.crypto.md5(body).toUpperCase(),
+    });
+    return accountRequest(path, body == null ? { ...query, ...extra } : query, jar, { signal, body, headers });
+  };
+  host.signInPrompt({ text: '正在生成汽水音乐登录二维码…' });
+  const { data: qr } = await requestQR('/passport/web/get_qrcode/');
+  checkLogin(attempt);
+  if (typeof qr?.token !== 'string' || !qr.token || qr.token.length > 8192 || authTarget(qr.qrcode_index_url).origin !== QR_ORIGIN) {
+    throw fail('汽水音乐未返回可用的二维码');
+  }
+  const prompt = text => host.signInPrompt({ qr: qr.qrcode_index_url, text });
+  prompt('请用汽水音乐 App 扫码，再在手机上确认');
+  const until = Date.now() + LOGIN_MS;
+  const form = String(new URLSearchParams({ ...extra, token: qr.token, is_frontier: String(qr.is_frontier === true) }));
+  while (Date.now() < until) {
+    await pollDelay(signal);
+    checkLogin(attempt);
+    const { data } = await requestQR('/passport/web/check_qrconnect/', form);
+    checkLogin(attempt);
+    const status = String(data?.status).trim().toLowerCase();
+    if (status === 'new' || status === '1') continue;
+    if (status === 'scanned' || status === '2') { prompt('已扫码，请在手机上确认'); continue; }
+    if (['expired', 'expire', 'timeout'].includes(status)) break;
+    if (!['confirmed', 'success', '3'].includes(status)) throw fail('汽水登录未完成，请重新扫码');
+    if (!sessionPresent(jar) && data.redirect_url) await completeRedirect(data.redirect_url, jar, signal);
+    return;
+  }
+  throw accountError('expired', '汽水二维码已过期，请重新扫码');
+}
+
+export function cancelSignIn() {
+  loginAttempt?.controller.abort();
+  loginAttempt = undefined;
+}
+
+export async function signIn() {
+  cancelSignIn();
+  const attempt = { controller: new AbortController() };
+  loginAttempt = attempt;
+  try {
+    const saved = storedAccount();
+    let jar = saved ? [...saved.cookies] : [];
+    let profile;
+    if (saved && sessionPresent(jar)) {
+      try {
+        const checked = await verifiedProfile(jar, attempt.controller.signal);
+        if (checked.id === saved.id) profile = checked;
+      } catch (error) { if (error.code !== 'signIn') throw error; }
+    }
+    if (!profile) {
+      jar = [];
+      await scanQR(attempt, jar);
+      profile = await verifiedProfile(jar, attempt.controller.signal);
+    }
+    checkLogin(attempt);
+    saveAccount(profile, jar, true);
+    accountRevision++;
+    return profile;
+  } finally {
+    if (loginAttempt === attempt) loginAttempt = undefined;
+  }
+}
+
+export async function account() {
+  const saved = storedAccount();
+  if (!saved?.active) return null;
+  const revision = accountRevision;
+  const jar = [...saved.cookies];
+  try {
+    const profile = await verifiedProfile(jar);
+    if (revision !== accountRevision) return null;
+    if (profile.id !== saved.id) throw loginRequired();
+    saveAccount(profile, jar, true);
+    return profile;
+  } catch (error) {
+    if (revision !== accountRevision) return null;
+    if (error.code !== 'signIn') throw error;
+    accountRevision++;
+    host.storage.set(SESSION_KEY, { ...saved, active: false });
+    return null;
+  }
+}
+
+export function signOut() {
+  cancelSignIn();
+  accountRevision++;
+  const saved = storedAccount();
+  if (saved) host.storage.set(SESSION_KEY, { ...saved, active: false });
+}
+
+async function withLibrary(load) {
+  const saved = storedAccount();
+  if (!saved?.active || !sessionPresent(saved.cookies)) throw loginRequired();
+  const revision = accountRevision;
+  const result = await load(saved.id, [...saved.cookies]);
+  if (revision !== accountRevision) throw loginRequired();
+  return result;
+}
+
+function libraryCollection(raw, owner) {
+  const id = accountID(raw?.id);
+  const title = raw?.title || raw?.public_title;
+  if (!id || typeof title !== 'string' || !title.trim()) throw fail('汽水音乐歌单信息无效');
+  const mine = accountID(raw.owner?.id) === owner;
+  return {
+    ...collection({ ...raw, title, url_cover: raw.cover_url || raw.url_cover, count_tracks: raw.count_tracks ?? raw.resource_cnt?.track_cnt }),
+    id: `account:${id}`,
+    mine,
+    fixed: mine && ![2, 3, 11].includes(Number(raw.type)),
+    saved: !mine && raw.state?.is_collected === true,
+  };
+}
+
+async function readPages(load, visit, allowInferredMore = false) {
+  let cursor = '';
+  const visited = new Set();
+  for (let page = 0; page < 500; page++) {
+    const data = await load(cursor);
+    const next = data.next_cursor == null ? '' : String(data.next_cursor);
+    if (next.length > 8192 || /[\u0000-\u001f\u007f]/.test(next) ||
+        (data.next_cursor != null && typeof data.next_cursor !== 'string' && !Number.isSafeInteger(data.next_cursor)) ||
+        (data.has_more != null && typeof data.has_more !== 'boolean')) throw fail('汽水音乐分页信息无效');
+    const more = data.has_more ?? (allowInferredMore && !!next && next !== '0' && next !== cursor);
+    visit(data, more);
+    if (!more) return;
+    if (!next || next === '0' || visited.has(next)) throw fail('汽水音乐分页未前进');
+    visited.add(next);
+    cursor = next;
+  }
+  throw fail('汽水音乐歌单超过可加载范围');
+}
+
+async function libraryRows(jar) {
+  const rows = new Map();
+  await readPages(cursor => accountRequest(LIBRARY_PATH, { aid: APP_ID, version_code: '30020100', count: String(PAGE_SIZE), cursor }, jar), data => {
+    if (!Array.isArray(data.playlists)) throw fail('汽水音乐个人歌单响应无效');
+    for (const row of data.playlists) {
+      const id = accountID(row?.id);
+      if (!id) throw fail('汽水音乐返回了无效歌单');
+      if (!rows.has(id)) rows.set(id, row);
+    }
+    if (rows.size > 25000) throw fail('汽水音乐个人歌单超过可加载范围');
+  });
+  return rows;
+}
+
+async function libraryDetail(id, owner, jar, known) {
+  const tracks = new Map();
+  let metadata = known;
+  await readPages(cursor => accountRequest(PRIVATE_DETAIL_PATH, { aid: APP_ID, playlist_id: id, count: '100', cursor }, jar), (data, more) => {
+    if (data.playlist?.id != null && accountID(data.playlist.id) !== id) throw fail('汽水音乐返回的不是所选歌单');
+    if (data.playlist?.id != null) metadata = { ...metadata, ...data.playlist };
+    if (!Array.isArray(data.media_resources)) {
+      const count = metadata?.count_tracks ?? metadata?.resource_cnt?.track_cnt;
+      const terminal = data.has_more === false || data.next_cursor === 0 || data.next_cursor === '0';
+      if (data.media_resources != null || more || (!tracks.size && (Number(count) > 0 || (count == null && !terminal)))) {
+        throw fail('汽水音乐未返回完整歌单');
+      }
+      return;
+    }
+    for (const resource of data.media_resources) {
+      if (resource?.type === 'video' || resource?.entity?.video) continue;
+      const track = resource?.entity?.track_wrapper?.track || resource?.entity?.track || resource?.track;
+      if (track == null && resource?.type !== 'track') continue;
+      if (!accountID(track?.id)) throw fail('汽水音乐返回了无效曲目');
+      const detail = song({ ...track, album: track.album && { ...track.album, url_cover: track.album.cover_url || track.album.url_cover } });
+      if (!track.vid || track.status || track.display_hint?.view_only_msg) detail.unavailable = true;
+      if (!tracks.has(detail.id)) tracks.set(detail.id, detail);
+    }
+    if (tracks.size > 25000) throw fail('汽水音乐歌单曲目超过可加载范围');
+  }, true);
+  if (!metadata) throw fail('没有找到这个汽水音乐歌单');
+  const count = metadata.count_tracks ?? metadata.resource_cnt?.track_cnt;
+  if (tracks.size === 0 && Number(count) > 0) throw fail('汽水音乐未返回完整歌单');
+  return { ...libraryCollection(metadata, owner), tracks: [...tracks.values()], trackCount: tracks.size };
+}
+
+export async function playlists() {
+  return withLibrary(async (owner, jar) => [...(await libraryRows(jar)).values()].map(row => libraryCollection(row, owner)));
+}
+
+export async function liked({ offset = 0 } = {}) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 25000) throw fail('喜欢列表的分页位置无效');
+  return withLibrary(async (owner, jar) => {
+    const rows = [...(await libraryRows(jar)).values()].filter(row => Number(row.type) === 1 && accountID(row.owner?.id) === owner);
+    if (rows.length !== 1) throw fail('汽水音乐未向当前设备提供喜欢列表');
+    const row = rows[0];
+    const { tracks } = await libraryDetail(accountID(row.id), owner, jar, row);
+    return { tracks: tracks.slice(offset, offset + PAGE_SIZE), more: offset + PAGE_SIZE < tracks.length };
+  });
 }
 
 async function request(path, body) {
@@ -73,20 +468,34 @@ async function recommendations() {
 }
 
 export async function home() {
-  const playlists = await recommendations();
-  const sections = [{ title: '推荐歌单', playlists }, { title: '音乐分类', links: [{ title: '浏览音乐分类', subtitle: '按风格和场景发现音乐', page: 'categories' }] }];
-  // Put real tracks on the home page as well, for one-click listening.
-  const first = await playlist({ id: playlists[0].id });
-  if (first.tracks.length) sections.push({ title: first.name, tracks: first.tracks.slice(0, 12) });
-  return {
-    title: '汽水音乐',
-    subtitle: '公开歌单 · 原生 AAC 播放',
-    sections,
-  };
+  const [recommended, moods] = await Promise.allSettled([recommendations(), categories()]);
+  if (recommended.status === 'rejected' && moods.status === 'rejected') throw recommended.reason;
+  const limit = 5;
+  const sections = [];
+  if (recommended.status === 'fulfilled') {
+    sections.push({ title: '精选歌单', playlists: recommended.value.slice(0, limit),
+      morePage: recommended.value.length > limit ? 'recommended' : undefined });
+  }
+  if (moods.status === 'fulfilled') {
+    sections.push({ title: '风格与场景', links: moods.value.slice(0, limit),
+      morePage: moods.value.length > limit ? 'categories' : undefined });
+  }
+  if (recommended.status === 'rejected') sections.push({ title: '精选歌单', links: [{ title: '查看推荐歌单', page: 'recommended' }] });
+  if (moods.status === 'rejected') sections.push({ title: '风格与场景', links: [{ title: '查看音乐分类', page: 'categories' }] });
+  return { title: '汽水音乐', sections };
 }
 
 export async function playlist({ id }) {
   id = String(id);
+  if (id.startsWith('account:')) {
+    const privateID = accountID(id.slice('account:'.length));
+    if (!privateID) throw fail('汽水音乐歌单 ID 无效');
+    return withLibrary(async (owner, jar) => {
+      const known = (await libraryRows(jar)).get(privateID);
+      if (!known) throw fail('该歌单不在当前汽水账号的个人库');
+      return libraryDetail(privateID, owner, jar, known);
+    });
+  }
   if (!/^\d+$/.test(id)) throw fail('歌单 ID 无效');
   const tracks = [];
   const ids = new Set();
@@ -208,8 +617,19 @@ async function categories() {
 }
 
 export async function browse({ page }) {
+  if (page === LOGIN_PAGE) {
+    const all = await playlists();
+    return { title: '我的汽水音乐', sections: [
+      { title: '我的歌单', playlists: all.filter(list => list.mine && !list.fixed) },
+      { title: '收藏的歌单', playlists: all.filter(list => list.saved) },
+      { title: '系统歌单', playlists: all.filter(list => list.mine && list.fixed) },
+    ] };
+  }
+  if (page === 'recommended') {
+    return { title: '精选歌单', sections: [{ playlists: await recommendations() }] };
+  }
   if (page === 'categories') {
-    return { title: '音乐分类', sections: [{ title: '风格与场景', links: await categories() }] };
+    return { title: '风格与场景', sections: [{ links: await categories() }] };
   }
   if (page.startsWith('radio:')) {
     const id = page.slice(6);

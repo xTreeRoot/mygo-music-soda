@@ -1,14 +1,16 @@
 {
   "id": "soda",
   "name": "汽水音乐",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "minAppVersion": "0.1.21",
   "main": "index.js",
   "playback": "stream",
   "permissions": {
     "network": [
       "beta-luna.douyin.com",
-      "*.douyinvod.com"
+      "*.douyinvod.com",
+      "api.qishui.com",
+      "bff-pc.qishui.com"
     ]
   },
   "navigation": [
@@ -17,9 +19,13 @@
       "builtin": "home"
     },
     {
-      "title": "音乐分类",
+      "title": "风格与场景",
       "page": "categories",
       "icon": "note"
+    },
+    {
+      "title": "喜欢的歌曲",
+      "builtin": "liked"
     }
   ]
 }
