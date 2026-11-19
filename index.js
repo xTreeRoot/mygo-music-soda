@@ -142,7 +142,9 @@ async function accountRequest(path, query, jar, options) {
   if (codes.includes(7)) throw accountError('rateLimit', '汽水请求过于频繁，请稍后重试');
   if (path.startsWith('/passport/') && codes.includes(2)) throw accountError('expired', '汽水二维码已过期，请重新扫码');
   if (codes.some(code => Number.isFinite(code) && code !== 0) || (path.startsWith('/passport/') && data.message !== 'success')) {
-    throw fail('汽水音乐拒绝了本次请求');
+    const stage = path === ACCOUNT_PATH ? '账号验证' : path.endsWith('check_qrconnect/') ? '扫码确认' : path.endsWith('get_qrcode/') ? '二维码' : '个人库';
+    const safeCodes = [...new Set(codes.filter(code => Number.isSafeInteger(code) && Math.abs(code) <= 2147483647))];
+    throw fail(`汽水音乐拒绝了本次请求（${stage}，错误码：${safeCodes.join('/') || '未提供'}）`);
   }
   return data;
 }
