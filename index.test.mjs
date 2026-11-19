@@ -125,6 +125,8 @@ const fixtureList = '9012345678901234562';
 const fixtureTrack = '9012345678901234563';
 const fixtureQR = 'https://bff-pc.qishui.com/ucenter_web/app/sdk-next?token=fixture-scan-ticket';
 const fixtureScan = 'https://bff-pc.qishui.com/light/invoke/scan_login?token=fixture-scan-ticket&os=Windows&computer_name=MB%20iOS';
+const devicePath = '/service/2/desktop/device_register/';
+const fixtureDevice = { version: 1, clientVersion: '3.7.0', id: '9012345678901234564', install: '9012345678901234565' };
 const qrPath = '/passport/web/get_qrcode/';
 const pollPath = '/passport/web/check_qrconnect/';
 const mePath = '/luna/pc/me';
@@ -141,6 +143,17 @@ function accountFixture() {
   const prompts = [];
   const requests = [];
   const reply = new Map([
+    [devicePath, (url, options) => {
+      assert.equal(options.method, 'POST');
+      assert.equal(options.headers['Content-Type'], 'application/json');
+      const { header, magic_tag } = JSON.parse(options.body);
+      assert.equal(magic_tag, 'ss_app_log');
+      assert.equal(header.aid, 386088);
+      assert.equal(header.app_version, '3.7.0');
+      assert.match(header.pc_uuid, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+      assert.equal(header.pc_serial, '');
+      return response({ device_id_str: fixtureDevice.id, install_id_str: fixtureDevice.install });
+    }],
     [qrPath, () => response({ message: 'success', data: { token: 'fixture-ticket', qrcode_index_url: fixtureQR, copywriting: JSON.stringify({ desc: '为保障账号安全，请使用[color=red]「抖音 APP」[/]扫码验证' }) } }, {
       cookies: ['passport_csrf_token=fixture-csrf; Path=/passport; Secure', 'unrelated=discard; Domain=outside.test; Path=/'],
     })],
@@ -186,18 +199,21 @@ test('QR waits for confirmation, validates an exact account ID and scopes the st
     });
     assert.deepEqual(Object.fromEntries(url.searchParams), {
       aid: '386088', passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1', account_sdk_source: 'web',
-      language: 'zh', device_platform: 'PC', version_code: '30020100', is_new_login: '1', is_from_iesaccountsaas: '1',
+      language: 'zh', device_platform: 'PC', version_code: '3.7.0', is_new_login: '1', is_from_iesaccountsaas: '1',
+      device_id: fixtureDevice.id, did: fixtureDevice.id, install_id: fixtureDevice.install, iid: fixtureDevice.install,
     });
     return ++polls === 1 ? response({ message: 'success', data: { status: 'scanned' } }) : confirm();
   });
   const plugin = await import(`./index.js?test=${++sequence}`);
   const profile = await plugin.signIn();
-  const create = requests[0];
+  const create = requests.find(item => item.url.pathname === qrPath);
+  assert.deepEqual(storage.get('qishuiDevice'), fixtureDevice);
   assert.equal(create.options.method, 'GET');
   assert.match(create.options.headers['User-Agent'], /^Mozilla\/5\.0 /);
   assert.deepEqual(Object.fromEntries(create.url.searchParams), {
     aid: '386088', passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1', account_sdk_source: 'web',
-    language: 'zh', device_platform: 'PC', version_code: '30020100', is_new_login: '1', is_from_iesaccountsaas: '1',
+    language: 'zh', device_platform: 'PC', version_code: '3.7.0', is_new_login: '1', is_from_iesaccountsaas: '1',
+    device_id: fixtureDevice.id, did: fixtureDevice.id, install_id: fixtureDevice.install, iid: fixtureDevice.install,
     next: accountOrigin, need_logo: 'false', need_short_url: 'false',
   });
   assert.equal(profile.id, fixtureAccount);
@@ -205,7 +221,7 @@ test('QR waits for confirmation, validates an exact account ID and scopes the st
   assert.equal(profile.page, 'my-library');
   assert.equal(prompts.filter(prompt => prompt.qr === fixtureScan).length, 2);
   assert.equal(prompts.find(prompt => prompt.qr === fixtureScan).text, '请用汽水音乐 App 扫码，再在手机上确认');
-  assert.deepEqual(requests.map(item => item.url.pathname), [qrPath, pollPath, pollPath, mePath]);
+  assert.deepEqual(requests.map(item => item.url.pathname), [devicePath, qrPath, pollPath, pollPath, mePath]);
   assert.equal(requests.at(-1).options.headers.Cookie, 'sessionid=fixture-session');
   assert.equal(requests.at(-1).options.headers['User-Agent'], 'LunaPC/3.0.0(290101097)');
   assert.deepEqual(storage.get('qishuiAccount').cookies.map(item => item.name), ['sessionid']);
@@ -277,7 +293,7 @@ test('cancelling recovery prevents another request or saving late account data',
   reply.set(pollPath, () => { throw new TypeError('synthetic disconnect'); });
   await assert.rejects(plugin.signIn(), { code: 'cancelled' });
   assert.equal(requests.filter(item => item.url.pathname === pollPath).length, 1);
-  assert.equal(storage.size, 0);
+  assert.equal(storage.has('qishuiAccount'), false);
 });
 
 test('HTTP refusals, verification challenges and malformed data are never retried', async context => {
@@ -288,7 +304,7 @@ test('HTTP refusals, verification challenges and malformed data are never retrie
     const plugin = await import(`./index.js?test=${++sequence}`);
     await assert.rejects(plugin.signIn());
     assert.equal(requests.filter(item => item.url.pathname === pollPath).length, 1);
-    assert.equal(storage.size, 0);
+    assert.equal(storage.has('qishuiAccount'), false);
   }
 });
 
@@ -305,12 +321,12 @@ test('cancelled and challenge-required logins never save or fall back to another
   plugin.cancelSignIn();
   lateReply(response({ message: 'success', data: { status: 'confirmed' } }, { cookies: ['sessionid=fixture-late; Path=/'] }));
   await assert.rejects(signingIn, { code: 'cancelled' });
-  assert.equal(storage.size, 0);
+  assert.equal(storage.has('qishuiAccount'), false);
   requests.length = 0;
   reply.set(pollPath, () => response({ message: 'error', data: { error_code: 2046, redirect_url: 'https://outside.test/verify' } }));
   await assert.rejects(plugin.signIn(), { code: 'verify' });
   assert.deepEqual(requests.map(item => item.url.pathname), [qrPath, pollPath]);
-  assert.equal(storage.size, 0);
+  assert.equal(storage.has('qishuiAccount'), false);
 });
 
 test('only the platform can mint a new session and an outside QR or redirect is rejected', async context => {
@@ -320,12 +336,12 @@ test('only the platform can mint a new session and an outside QR or redirect is 
   const plugin = await import(`./index.js?test=${++sequence}`);
   reply.set(qrPath, () => response({ message: 'success', data: { token: 'fake', qrcode_index_url: 'https://outside.test/qr' } }));
   await assert.rejects(plugin.signIn(), { code: 'unavailable' });
-  assert.equal(requests.length, 1);
+  assert.deepEqual(requests.map(item => item.url.pathname), [devicePath, qrPath]);
   reply.set(qrPath, original);
   reply.set(pollPath, () => response({ message: 'success', data: { status: 'confirmed', redirect_url: 'https://outside.test/finish' } }));
   await assert.rejects(plugin.signIn(), { code: 'unavailable' });
   assert.ok(requests.every(item => item.url.origin === accountOrigin));
-  assert.equal(storage.size, 0);
+  assert.equal(storage.has('qishuiAccount'), false);
 });
 
 test('account library paginates private, saved and system lists and uses only the owned favorites list for likes', async context => {
@@ -365,4 +381,51 @@ test('rejects broken pagination and does not turn a missing favorites endpoint i
   await assert.rejects(plugin.playlists(), /分页未前进/);
   reply.set(libraryPath, () => response({ playlists: [], has_more: false }));
   await assert.rejects(plugin.liked(), /未向当前设备提供/);
+});
+
+test('anonymous device identity is reused across login attempts without copying another installation', async context => {
+  fastPolling(context);
+  const { storage, requests } = accountFixture();
+  const first = await import(`./index.js?test=${++sequence}`);
+  await first.signIn();
+  first.signOut();
+  storage.delete('qishuiAccount');
+  const second = await import(`./index.js?test=${++sequence}`);
+  await second.signIn();
+  assert.equal(requests.filter(item => item.url.pathname === devicePath).length, 1);
+  assert.equal(requests.filter(item => item.url.pathname === qrPath).length, 2);
+  for (const { url } of requests.filter(item => [qrPath, pollPath].includes(item.url.pathname))) {
+    assert.equal(url.searchParams.get('device_id'), fixtureDevice.id);
+    assert.equal(url.searchParams.get('did'), fixtureDevice.id);
+    assert.equal(url.searchParams.get('install_id'), fixtureDevice.install);
+    assert.equal(url.searchParams.get('iid'), fixtureDevice.install);
+  }
+});
+
+test('invalid registration and registration disconnects never create a QR or save a login', async context => {
+  fastPolling(context);
+  for (const answer of [() => response({ device_id_str: '7' }), () => response({}, { status: 503 }), () => { throw new TypeError('synthetic disconnect'); }]) {
+    const { storage, requests, reply } = accountFixture();
+    reply.set(devicePath, answer);
+    const plugin = await import(`./index.js?test=${++sequence}`);
+    await assert.rejects(plugin.signIn());
+    assert.deepEqual(requests.map(item => item.url.pathname), [devicePath]);
+    assert.equal(storage.size, 0);
+  }
+});
+
+test('cancelling anonymous registration rejects a late identity before storage or QR creation', async context => {
+  fastPolling(context);
+  const { storage, requests, reply } = accountFixture();
+  let release, entered;
+  const waiting = new Promise(resolve => { entered = resolve; });
+  reply.set(devicePath, () => { entered(); return new Promise(resolve => { release = resolve; }); });
+  const plugin = await import(`./index.js?test=${++sequence}`);
+  const signing = plugin.signIn();
+  await waiting;
+  plugin.cancelSignIn();
+  release(response({ device_id_str: fixtureDevice.id, install_id_str: fixtureDevice.install }));
+  await assert.rejects(signing, { code: 'cancelled' });
+  assert.deepEqual(requests.map(item => item.url.pathname), [devicePath]);
+  assert.equal(storage.size, 0);
 });

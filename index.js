@@ -5,6 +5,9 @@ const lyricsCache = new Map();
 const ACCOUNT_API = 'https://api.qishui.com';
 const QR_ORIGIN = 'https://bff-pc.qishui.com';
 const APP_ID = '386088';
+const CLIENT_VERSION = '3.7.0';
+const DEVICE_PATH = '/service/2/desktop/device_register/';
+const DEVICE_KEY = 'qishuiDevice';
 const LOGIN_NEXT = ACCOUNT_API;
 const LOGIN_PAGE = 'my-library';
 const SESSION_KEY = 'qishuiAccount';
@@ -143,7 +146,7 @@ async function accountRequest(path, query, jar, options) {
   if (codes.includes(7)) throw accountError('rateLimit', '汽水请求过于频繁，请稍后重试');
   if (path.startsWith('/passport/') && codes.includes(2)) throw accountError('expired', '汽水二维码已过期，请重新扫码');
   if (codes.some(code => Number.isFinite(code) && code !== 0) || (path.startsWith('/passport/') && data.message !== 'success')) {
-    const stage = path === ACCOUNT_PATH ? '账号验证' : path.endsWith('check_qrconnect/') ? '扫码确认' : path.endsWith('get_qrcode/') ? '二维码' : '个人库';
+    const stage = path === DEVICE_PATH ? '设备初始化' : path === ACCOUNT_PATH ? '账号验证' : path.endsWith('check_qrconnect/') ? '扫码确认' : path.endsWith('get_qrcode/') ? '二维码' : '个人库';
     const safeCodes = [...new Set(codes.filter(code => Number.isSafeInteger(code) && Math.abs(code) <= 2147483647))];
     throw fail(`汽水音乐拒绝了本次请求（${stage}，错误码：${safeCodes.join('/') || '未提供'}）`);
   }
@@ -208,12 +211,39 @@ async function readLogin(attempt, read, recover = () => {}) {
   }
 }
 
-// 扫码包装与请求体对照官方 3.7.0；数字 version_code 使用公开参考且匿名取码实测通过的值。
-// 官方 WebInterfaceSdk Pro 上报版本为 2.4.13；不复用其他客户端安装的设备 ID。
-function passportQuery() {
+// 设备注册合同来自公开汽水插件，已用全新匿名实例核对；不读取真实硬件序列号。
+async function loginDevice(attempt, jar) {
+  const saved = host.storage.get(DEVICE_KEY);
+  if (saved?.version === 1 && saved.clientVersion === CLIENT_VERSION && accountID(saved.id) && accountID(saved.install)) return saved;
+  const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, part => {
+    const digit = Math.floor(Math.random() * 16);
+    return (part === 'x' ? digit : (digit & 3) | 8).toString(16);
+  });
+  const common = { aid: APP_ID, channel: 'official', os: 'Windows', os_version: 'Windows 10: 10.0', device_platform: 'PC', app_version: CLIENT_VERSION };
+  const header = {
+    ...common, aid: Number(APP_ID), device_id: '', install_id: '', sdk_version: '1.0', sdk_version_code: 1,
+    mc: '00:00:00:00:00:00', package: 'com.soda.music', language: 'zh-CN', device_model: 'no detected',
+    time_zone: 'Asia/Shanghai', tz_name: 'Asia/Shanghai', tz_offset: 0, resolution: 'no detected',
+    app_region: 'cn', app_language: 'zh-CN', display_name: '汽水音乐', pc_uuid: uuid, pc_serial: '',
+  };
+  const data = await accountRequest(DEVICE_PATH, common, jar, {
+    signal: attempt.controller.signal, body: JSON.stringify({ header, gen_time: Date.now(), magic_tag: 'ss_app_log' }),
+    headers: { 'User-Agent': `LunaPC/${CLIENT_VERSION}(official)`, 'Content-Type': 'application/json' },
+  });
+  checkLogin(attempt);
+  const id = accountID(data.device_id_str), install = accountID(data.install_id_str);
+  if (!id || !install) throw fail('汽水音乐未返回有效的登录设备信息');
+  const device = { version: 1, clientVersion: CLIENT_VERSION, id, install };
+  host.storage.set(DEVICE_KEY, device);
+  return device;
+}
+
+// 官方 3.7.0 登录组件使用同一次注册得到的四个设备字段；整个扫码流程保持一致。
+function passportQuery(device) {
   return {
     aid: APP_ID, passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1', account_sdk_source: 'web',
-    language: 'zh', device_platform: 'PC', version_code: '30020100', is_new_login: '1', is_from_iesaccountsaas: '1',
+    language: 'zh', device_platform: 'PC', version_code: CLIENT_VERSION, is_new_login: '1', is_from_iesaccountsaas: '1',
+    device_id: device.id, did: device.id, install_id: device.install, iid: device.install,
   };
 }
 
@@ -228,11 +258,13 @@ async function completeRedirect(address, jar, signal) {
 
 async function scanQR(attempt, jar) {
   const { signal } = attempt.controller;
+  host.signInPrompt({ text: '正在初始化汽水音乐登录…' });
+  const device = await loginDevice(attempt, jar);
   const requestQR = (path, extra = {}, confirm = false) => {
     const csrf = ['passport_csrf_token', 'passport_csrf_token_default'].map(name =>
       jar.find(cookie => cookie.name === name && cookieApplies(cookie, path))).find(Boolean);
     const fields = { next: LOGIN_NEXT, need_logo: 'false', need_short_url: 'false', is_new_login: '1', ...extra };
-    return accountRequest(path, { ...passportQuery(), ...(confirm ? {} : fields) }, jar, {
+    return accountRequest(path, { ...passportQuery(device), ...(confirm ? {} : fields) }, jar, {
       signal, ...(confirm ? { body: String(new URLSearchParams(fields)) } : {}),
       headers: { 'x-tt-passport-csrf-token': csrf?.value || '', ...(confirm ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}) },
     });
