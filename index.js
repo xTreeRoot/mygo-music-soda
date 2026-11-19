@@ -1,3 +1,5 @@
+import { loginHTML } from './login-page.js';
+
 const API = 'https://beta-luna.douyin.com';
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
 const pendingDetails = new Map();
@@ -260,6 +262,14 @@ async function scanQR(attempt, jar) {
   const { signal } = attempt.controller;
   host.signInPrompt({ text: '正在初始化汽水音乐登录…' });
   const device = await loginDevice(attempt, jar);
+  if (globalThis.host?.capabilities?.webSignInHTML === true) {
+    const result = await host.webSignIn({ url: ACCOUNT_API + '/passport/', cookiesOf: ACCOUNT_API + '/', until: ['sessionid'], userAgent: WEB_UA, html: loginHTML(device) });
+    checkLogin(attempt);
+    if (typeof result?.cookie !== 'string' || result.cookie.length > 65536 || /[\r\n]/.test(result.cookie)) throw loginRequired();
+    updateCookies(jar, result.cookie.split(';').map(pair => pair.trim() + '; Path=/; Secure'), new URL(ACCOUNT_API));
+    if (!sessionPresent(jar)) throw loginRequired();
+    return;
+  }
   const requestQR = (path, extra = {}, confirm = false) => {
     const csrf = ['passport_csrf_token', 'passport_csrf_token_default'].map(name =>
       jar.find(cookie => cookie.name === name && cookieApplies(cookie, path))).find(Boolean);

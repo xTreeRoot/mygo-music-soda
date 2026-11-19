@@ -429,3 +429,44 @@ test('cancelling anonymous registration rejects a late identity before storage o
   assert.deepEqual(requests.map(item => item.url.pathname), [devicePath]);
   assert.equal(storage.size, 0);
 });
+
+test('browser sign-in keeps SDK and cookies in one page and verifies the returned session before saving', async context => {
+  fastPolling(context);
+  const { storage, requests } = accountFixture();
+  host.capabilities = { webSignInHTML: true };
+  let pages = 0;
+  host.webSignIn = async options => {
+    pages++;
+    assert.equal(options.url, accountOrigin + '/passport/');
+    assert.equal(options.cookiesOf, accountOrigin + '/');
+    assert.deepEqual(options.until, ['sessionid']);
+    assert.ok(Buffer.byteLength(options.html) < 262144);
+    assert.ok(options.html.includes(fixtureDevice.id));
+    assert.ok(options.html.includes(fixtureDevice.install));
+    return { cookie: 'sessionid=fixture-browser-session; passport_csrf_token=fixture-browser-csrf' };
+  };
+  const plugin = await import(`./index.js?test=${++sequence}`);
+  assert.equal((await plugin.signIn()).id, fixtureAccount);
+  assert.equal(pages, 1);
+  assert.deepEqual(requests.map(item => item.url.pathname), [devicePath, mePath]);
+  assert.deepEqual(storage.get('qishuiAccount').cookies.map(item => item.name), ['sessionid']);
+});
+
+test('browser failures and late completion after cancellation preserve the previous account', async context => {
+  fastPolling(context);
+  for (const cancel of [false, true]) {
+    const { storage, requests } = accountFixture();
+    const previous = { version: 1, id: '7', cookies: [], active: false };
+    storage.set('qishuiAccount', previous);
+    host.capabilities = { webSignInHTML: true };
+    const plugin = await import(`./index.js?test=${++sequence}`);
+    host.webSignIn = async () => {
+      if (!cancel) throw new Error('synthetic browser failure');
+      plugin.cancelSignIn();
+      return { cookie: 'sessionid=fixture-late' };
+    };
+    await assert.rejects(plugin.signIn());
+    assert.deepEqual(storage.get('qishuiAccount'), previous);
+    assert.deepEqual(requests.map(item => item.url.pathname), [devicePath]);
+  }
+});

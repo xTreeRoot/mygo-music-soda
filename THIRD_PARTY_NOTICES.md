@@ -1,1 +1,3 @@
 The public endpoint and metadata adapters were developed with reference to qishui-api (https://github.com/guowenye/qishui-api), Copyright (c) 2026 arrow, MIT. The license text is included in LICENSE.
+
+The login-page QR encoder embeds the unmodified qrcode-generator 2.0.4 browser distribution (https://www.npmjs.com/package/qrcode-generator), Copyright (c) 2009 Kazuhiko Arase, MIT. The full MIT grant and disclaimer in LICENSE apply to this component under this copyright notice. Official security scripts are loaded directly from the platform CDN into the ephemeral login page; they are not bundled or modified.
