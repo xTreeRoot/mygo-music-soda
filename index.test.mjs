@@ -209,6 +209,69 @@ test('logout stays disabled across reload, and login checks saved credentials on
   assert.equal(storage.get('qishuiAccount').active, false);
 });
 
+test('app-switch disconnects recover the same QR, pending cookies and verified profile', async context => {
+  const timer = globalThis.setTimeout;
+  context.mock.method(globalThis, 'setTimeout', (callback, ms) => timer(callback, ms <= 2000 ? 0 : ms));
+  const { storage, requests, prompts, reply } = accountFixture();
+  const confirmed = reply.get(pollPath), profile = reply.get(mePath);
+  let polls = 0, profiles = 0;
+  reply.set(pollPath, (url, options) => {
+    assert.equal(new URLSearchParams(options.body).get('token'), 'fixture-ticket');
+    assert.equal(options.headers.Cookie, 'passport_csrf_token=fixture-csrf');
+    polls++;
+    if (polls === 1) return response({ message: 'success', data: { status: 'scanned' } });
+    if (polls === 2) throw new TypeError('synthetic connection lost -1005');
+    return confirmed();
+  });
+  reply.set(mePath, (url, options) => {
+    assert.equal(options.headers.Cookie, 'sessionid=fixture-session');
+    if (++profiles === 1) throw new TypeError('synthetic profile disconnect -1005');
+    return profile();
+  });
+  const plugin = await import(`./index.js?test=${++sequence}`);
+  assert.equal((await plugin.signIn()).id, fixtureAccount);
+  assert.equal(requests.filter(item => item.url.pathname === qrPath).length, 1);
+  assert.deepEqual([polls, profiles], [3, 2]);
+  assert.equal(new Set(prompts.filter(item => item.qr).map(item => item.qr)).size, 1);
+  assert.equal(storage.get('qishuiAccount').active, true);
+});
+
+test('transport recovery is bounded and does not replace an older stored account', async context => {
+  const timer = globalThis.setTimeout;
+  context.mock.method(globalThis, 'setTimeout', (callback, ms) => timer(callback, ms <= 2000 ? 0 : ms));
+  const { storage, requests, reply } = accountFixture();
+  const old = { version: 1, id: '7', cookies: [], active: false };
+  storage.set('qishuiAccount', old);
+  reply.set(pollPath, () => { throw new TypeError('synthetic private data'); });
+  const plugin = await import(`./index.js?test=${++sequence}`);
+  await assert.rejects(plugin.signIn(), error => error.code === 'network' && !error.message.includes('synthetic'));
+  assert.equal(requests.filter(item => item.url.pathname === pollPath).length, 3);
+  assert.deepEqual(storage.get('qishuiAccount'), old);
+});
+
+test('cancelling recovery prevents another request or saving late account data', async context => {
+  fastPolling(context);
+  const { storage, requests, reply } = accountFixture();
+  const plugin = await import(`./index.js?test=${++sequence}`);
+  host.signInPrompt = prompt => { if (prompt.text.includes('正在恢复登录')) plugin.cancelSignIn(); };
+  reply.set(pollPath, () => { throw new TypeError('synthetic disconnect'); });
+  await assert.rejects(plugin.signIn(), { code: 'cancelled' });
+  assert.equal(requests.filter(item => item.url.pathname === pollPath).length, 1);
+  assert.equal(storage.size, 0);
+});
+
+test('HTTP refusals, verification challenges and malformed data are never retried', async context => {
+  fastPolling(context);
+  for (const result of [response({}, { status: 503 }), response({ status_code: 2046 }), response('broken JSON')]) {
+    const { requests, storage, reply } = accountFixture();
+    reply.set(pollPath, () => result);
+    const plugin = await import(`./index.js?test=${++sequence}`);
+    await assert.rejects(plugin.signIn());
+    assert.equal(requests.filter(item => item.url.pathname === pollPath).length, 1);
+    assert.equal(storage.size, 0);
+  }
+});
+
 test('cancelled and challenge-required logins never save or fall back to another client', async context => {
   fastPolling(context);
   const { storage, requests, reply } = accountFixture();

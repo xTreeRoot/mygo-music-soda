@@ -174,16 +174,35 @@ function checkLogin(attempt) {
   if (attempt !== loginAttempt || attempt.controller.signal.aborted) throw accountError('cancelled', '汽水登录已取消');
 }
 
-function pollDelay(signal) {
+function pollDelay(signal, milliseconds = POLL_MS) {
+  if (signal.aborted) return Promise.resolve();
   return new Promise(resolve => {
     const finish = () => {
       clearTimeout(timer);
       signal.removeEventListener('abort', finish);
       resolve();
     };
-    const timer = setTimeout(finish, POLL_MS);
+    const timer = setTimeout(finish, milliseconds);
     signal.addEventListener('abort', finish, { once: true });
   });
+}
+
+// 只恢复扫码状态和资料读取，保留同一个二维码及临时 Cookie；不重放登录跳转或账号写入。
+async function readLogin(attempt, read, recover = () => {}) {
+  const delays = [500, 1500];
+  for (let retry = 0; ; retry++) {
+    checkLogin(attempt);
+    try {
+      const value = await read();
+      checkLogin(attempt);
+      return value;
+    } catch (error) {
+      checkLogin(attempt);
+      if (error.code !== 'network' || retry >= delays.length) throw error;
+      recover();
+      await pollDelay(attempt.controller.signal, delays[retry]);
+    }
+  }
 }
 
 function passportQuery() {
@@ -229,7 +248,8 @@ async function scanQR(attempt, jar) {
   while (Date.now() < until) {
     await pollDelay(signal);
     checkLogin(attempt);
-    const { data } = await requestQR('/passport/web/check_qrconnect/', form);
+    const { data } = await readLogin(attempt, () => requestQR('/passport/web/check_qrconnect/', form),
+      () => prompt('网络连接已中断，正在恢复登录…'));
     checkLogin(attempt);
     const status = String(data?.status).trim().toLowerCase();
     if (status === 'new' || status === '1') continue;
@@ -257,14 +277,15 @@ export async function signIn() {
     let profile;
     if (saved && sessionPresent(jar)) {
       try {
-        const checked = await verifiedProfile(jar, attempt.controller.signal);
+        const checked = await readLogin(attempt, () => verifiedProfile(jar, attempt.controller.signal));
         if (checked.id === saved.id) profile = checked;
       } catch (error) { if (error.code !== 'signIn') throw error; }
     }
     if (!profile) {
       jar = [];
       await scanQR(attempt, jar);
-      profile = await verifiedProfile(jar, attempt.controller.signal);
+      profile = await readLogin(attempt, () => verifiedProfile(jar, attempt.controller.signal),
+        () => host.signInPrompt({ text: '网络连接已中断，正在读取已授权账号…' }));
     }
     checkLogin(attempt);
     saveAccount(profile, jar, true);
