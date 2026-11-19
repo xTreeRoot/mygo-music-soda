@@ -140,7 +140,7 @@ function accountFixture() {
   const prompts = [];
   const requests = [];
   const reply = new Map([
-    [qrPath, () => response({ message: 'success', data: { token: 'fixture-ticket', qrcode_index_url: fixtureQR } }, {
+    [qrPath, () => response({ message: 'success', data: { token: 'fixture-ticket', qrcode_index_url: fixtureQR, copywriting: JSON.stringify({ desc: '为保障账号安全，请使用[color=red]「抖音 APP」[/]扫码验证' }) } }, {
       cookies: ['passport_csrf_token=fixture-csrf; Path=/passport; Secure', 'unrelated=discard; Domain=outside.test; Path=/'],
     })],
     [pollPath, () => response({ message: 'success', data: { status: 'confirmed' } }, {
@@ -201,6 +201,7 @@ test('QR waits for confirmation, validates an exact account ID and scopes the st
   assert.equal(profile.name, `汽水测试 ${fixtureAccount}`);
   assert.equal(profile.page, 'my-library');
   assert.equal(prompts.filter(prompt => prompt.qr === fixtureQR).length, 2);
+  assert.equal(prompts.find(prompt => prompt.qr === fixtureQR).text, '请用抖音 App扫码，再在手机上确认');
   assert.deepEqual(requests.map(item => item.url.pathname), [qrPath, pollPath, pollPath, mePath]);
   assert.equal(requests.at(-1).options.headers.Cookie, 'sessionid=fixture-session');
   assert.equal(requests.at(-1).options.headers['User-Agent'], 'LunaPC/3.0.0(290101097)');

@@ -236,8 +236,13 @@ async function scanQR(attempt, jar) {
   if (typeof qr?.token !== 'string' || !qr.token || qr.token.length > 8192 || authTarget(qr.qrcode_index_url).origin !== QR_ORIGIN) {
     throw fail('汽水音乐未返回可用的二维码');
   }
+  // 汽水的 Passport 二维码可能指定抖音验证，必须遵循平台返回的扫码应用。
+  let instruction = typeof qr.copywriting === 'string' ? qr.copywriting.slice(0, 8192) : '';
+  try { instruction = JSON.parse(instruction).desc || instruction; } catch { /* 平台也可能直接返回普通文本。 */ }
+  const scanApp = typeof instruction === 'string' && instruction.includes('抖音') ? '抖音 App' :
+    typeof instruction === 'string' && instruction.includes('汽水') ? '汽水音乐 App' : '二维码指定的官方 App';
   const prompt = text => host.signInPrompt({ qr: qr.qrcode_index_url, text });
-  prompt('请用汽水音乐 App 扫码，再在手机上确认');
+  prompt(`请用${scanApp}扫码，再在手机上确认`);
   const until = Date.now() + LOGIN_MS;
   const form = String(new URLSearchParams({ ...extra, token: qr.token, is_frontier: 'true' }));
   while (Date.now() < until) {
