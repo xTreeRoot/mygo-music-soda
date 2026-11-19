@@ -123,7 +123,8 @@ const accountOrigin = 'https://api.qishui.com';
 const fixtureAccount = '9012345678901234561';
 const fixtureList = '9012345678901234562';
 const fixtureTrack = '9012345678901234563';
-const fixtureQR = 'https://bff-pc.qishui.com/fixture';
+const fixtureQR = 'https://bff-pc.qishui.com/ucenter_web/app/sdk-next?token=fixture-scan-ticket';
+const fixtureScan = 'https://bff-pc.qishui.com/light/invoke/scan_login?token=fixture-scan-ticket&os=Windows&computer_name=MB%20iOS';
 const qrPath = '/passport/web/get_qrcode/';
 const pollPath = '/passport/web/check_qrconnect/';
 const mePath = '/luna/pc/me';
@@ -175,16 +176,17 @@ test('QR waits for confirmation, validates an exact account ID and scopes the st
   let polls = 0;
   reply.set(pollPath, (url, options) => {
     assert.equal(url.origin, accountOrigin);
-    assert.equal(new URLSearchParams(options.body).get('token'), 'fixture-ticket');
     assert.equal(options.headers.Cookie, 'passport_csrf_token=fixture-csrf');
     assert.equal(options.method, 'POST');
-    assert.match(options.headers['User-Agent'], /^Mozilla\/5\.0 /);
     assert.equal(options.headers['Content-Type'], 'application/x-www-form-urlencoded');
-    assert.deepEqual(Object.fromEntries(url.searchParams), {
-      aid: '386088', passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1', iid: '27960026095955',
-    });
+    assert.match(options.headers['User-Agent'], /^Mozilla\/5\.0 /);
+    assert.equal(options.headers['x-tt-passport-csrf-token'], 'fixture-csrf');
     assert.deepEqual(Object.fromEntries(new URLSearchParams(options.body)), {
       next: accountOrigin, need_logo: 'false', need_short_url: 'false', is_new_login: '1', token: 'fixture-ticket', is_frontier: 'true',
+    });
+    assert.deepEqual(Object.fromEntries(url.searchParams), {
+      aid: '386088', passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1', account_sdk_source: 'web',
+      language: 'zh', device_platform: 'PC', version_code: '30020100', is_new_login: '1', is_from_iesaccountsaas: '1',
     });
     return ++polls === 1 ? response({ message: 'success', data: { status: 'scanned' } }) : confirm();
   });
@@ -194,14 +196,15 @@ test('QR waits for confirmation, validates an exact account ID and scopes the st
   assert.equal(create.options.method, 'GET');
   assert.match(create.options.headers['User-Agent'], /^Mozilla\/5\.0 /);
   assert.deepEqual(Object.fromEntries(create.url.searchParams), {
-    aid: '386088', passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1',
-    next: accountOrigin, need_logo: 'false', need_short_url: 'false', is_new_login: '1',
+    aid: '386088', passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1', account_sdk_source: 'web',
+    language: 'zh', device_platform: 'PC', version_code: '30020100', is_new_login: '1', is_from_iesaccountsaas: '1',
+    next: accountOrigin, need_logo: 'false', need_short_url: 'false',
   });
   assert.equal(profile.id, fixtureAccount);
   assert.equal(profile.name, `汽水测试 ${fixtureAccount}`);
   assert.equal(profile.page, 'my-library');
-  assert.equal(prompts.filter(prompt => prompt.qr === fixtureQR).length, 2);
-  assert.equal(prompts.find(prompt => prompt.qr === fixtureQR).text, '请用抖音 App扫码，再在手机上确认');
+  assert.equal(prompts.filter(prompt => prompt.qr === fixtureScan).length, 2);
+  assert.equal(prompts.find(prompt => prompt.qr === fixtureScan).text, '请用汽水音乐 App 扫码，再在手机上确认');
   assert.deepEqual(requests.map(item => item.url.pathname), [qrPath, pollPath, pollPath, mePath]);
   assert.equal(requests.at(-1).options.headers.Cookie, 'sessionid=fixture-session');
   assert.equal(requests.at(-1).options.headers['User-Agent'], 'LunaPC/3.0.0(290101097)');
@@ -279,7 +282,7 @@ test('cancelling recovery prevents another request or saving late account data',
 
 test('HTTP refusals, verification challenges and malformed data are never retried', async context => {
   fastPolling(context);
-  for (const result of [response({}, { status: 503 }), response({ status_code: 2046 }), response({ message: 'error', data: { error_code: 2156 } }), response('broken JSON')]) {
+  for (const result of [response({}, { status: 503 }), response({ status_code: 2046 }), response({ message: 'error', data: { error_code: 2156 } }), response({ message: 'error', data: { error_code: 7 } }), response('broken JSON')]) {
     const { requests, storage, reply } = accountFixture();
     reply.set(pollPath, () => result);
     const plugin = await import(`./index.js?test=${++sequence}`);

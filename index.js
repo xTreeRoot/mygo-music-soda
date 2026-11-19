@@ -5,6 +5,7 @@ const lyricsCache = new Map();
 const ACCOUNT_API = 'https://api.qishui.com';
 const QR_ORIGIN = 'https://bff-pc.qishui.com';
 const APP_ID = '386088';
+const LOGIN_NEXT = ACCOUNT_API;
 const LOGIN_PAGE = 'my-library';
 const SESSION_KEY = 'qishuiAccount';
 const SESSION_COOKIES = new Set(['sessionid', 'sessionid_ss', 'sid_guard', 'sid_tt']);
@@ -45,7 +46,7 @@ function parseAccountJSON(text) {
 }
 
 function authTarget(address) {
-  if (typeof address !== 'string' || address.length > 16384 || !/^https:\/\/(api|bff-pc)\.qishui\.com(?:\/|\?|$)/.test(address) || /[\\\s\u0000-\u001f\u007f]/.test(address)) {
+  if (typeof address !== 'string' || address.length > 16384 || !/^https:\/\/(?:api|bff-pc)\.qishui\.com(?:\/|\?|$)/.test(address) || /[\\\s\u0000-\u001f\u007f]/.test(address)) {
     throw fail('汽水音乐登录地址无效');
   }
   return new URL(address);
@@ -207,9 +208,13 @@ async function readLogin(attempt, read, recover = () => {}) {
   }
 }
 
-// 对齐 qishui-api 的汽水 Passport 合同，避免混入其他客户端的设备与 SDK 参数。
+// 扫码包装与请求体对照官方 3.7.0；数字 version_code 使用公开参考且匿名取码实测通过的值。
+// 官方 WebInterfaceSdk Pro 上报版本为 2.4.13；不复用其他客户端安装的设备 ID。
 function passportQuery() {
-  return { aid: APP_ID, passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1' };
+  return {
+    aid: APP_ID, passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1', account_sdk_source: 'web',
+    language: 'zh', device_platform: 'PC', version_code: '30020100', is_new_login: '1', is_from_iesaccountsaas: '1',
+  };
 }
 
 async function completeRedirect(address, jar, signal) {
@@ -223,12 +228,14 @@ async function completeRedirect(address, jar, signal) {
 
 async function scanQR(attempt, jar) {
   const { signal } = attempt.controller;
-  const extra = { next: ACCOUNT_API, need_logo: 'false', need_short_url: 'false', is_new_login: '1' };
-  const requestQR = (path, body) => {
-    const query = passportQuery();
-    const headers = body == null ? {} : { 'Content-Type': 'application/x-www-form-urlencoded' };
-    if (body != null) query.iid = '27960026095955';
-    return accountRequest(path, body == null ? { ...query, ...extra } : query, jar, { signal, body, headers });
+  const requestQR = (path, extra = {}, confirm = false) => {
+    const csrf = ['passport_csrf_token', 'passport_csrf_token_default'].map(name =>
+      jar.find(cookie => cookie.name === name && cookieApplies(cookie, path))).find(Boolean);
+    const fields = { next: LOGIN_NEXT, need_logo: 'false', need_short_url: 'false', is_new_login: '1', ...extra };
+    return accountRequest(path, { ...passportQuery(), ...(confirm ? {} : fields) }, jar, {
+      signal, ...(confirm ? { body: String(new URLSearchParams(fields)) } : {}),
+      headers: { 'x-tt-passport-csrf-token': csrf?.value || '', ...(confirm ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}) },
+    });
   };
   host.signInPrompt({ text: '正在生成汽水音乐登录二维码…' });
   const { data: qr } = await requestQR('/passport/web/get_qrcode/');
@@ -236,19 +243,19 @@ async function scanQR(attempt, jar) {
   if (typeof qr?.token !== 'string' || !qr.token || qr.token.length > 8192 || authTarget(qr.qrcode_index_url).origin !== QR_ORIGIN) {
     throw fail('汽水音乐未返回可用的二维码');
   }
-  // 汽水的 Passport 二维码可能指定抖音验证，必须遵循平台返回的扫码应用。
-  let instruction = typeof qr.copywriting === 'string' ? qr.copywriting.slice(0, 8192) : '';
-  try { instruction = JSON.parse(instruction).desc || instruction; } catch { /* 平台也可能直接返回普通文本。 */ }
-  const scanApp = typeof instruction === 'string' && instruction.includes('抖音') ? '抖音 App' :
-    typeof instruction === 'string' && instruction.includes('汽水') ? '汽水音乐 App' : '二维码指定的官方 App';
-  const prompt = text => host.signInPrompt({ qr: qr.qrcode_index_url, text });
-  prompt(`请用${scanApp}扫码，再在手机上确认`);
+  // 官方汽水客户端使用扫码专用入口；展示通用 SDK 地址会进入另一条授权流程。
+  const scanToken = new URL(qr.qrcode_index_url).searchParams.get('token');
+  if (!scanToken || scanToken.length > 8192) throw fail('汽水音乐未返回可用的扫码凭据');
+  const scanURL = QR_ORIGIN + '/light/invoke/scan_login?' + String(new URLSearchParams({
+    token: scanToken, os: 'Windows', computer_name: globalThis.host?.platform === 'ios' ? 'MB iOS' : 'MB',
+  })).replace(/\+/g, '%20');
+  const prompt = text => host.signInPrompt({ qr: scanURL, text });
+  prompt('请用汽水音乐 App 扫码，再在手机上确认');
   const until = Date.now() + LOGIN_MS;
-  const form = String(new URLSearchParams({ ...extra, token: qr.token, is_frontier: 'true' }));
   while (Date.now() < until) {
     await pollDelay(signal);
     checkLogin(attempt);
-    const { data } = await readLogin(attempt, () => requestQR('/passport/web/check_qrconnect/', form),
+    const { data } = await readLogin(attempt, () => requestQR('/passport/web/check_qrconnect/', { token: qr.token, is_frontier: 'true' }, true),
       () => prompt('网络连接已中断，正在恢复登录…'));
     checkLogin(attempt);
     const status = String(data?.status).trim().toLowerCase();
