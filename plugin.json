@@ -1,7 +1,7 @@
 {
   "id": "soda",
   "name": "汽水音乐",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "minAppVersion": "0.1.27",
   "main": "index.js",
   "playback": "stream",
@@ -12,7 +12,13 @@
       "api.qishui.com",
       "bff-pc.qishui.com",
       "lf-headquarters-speed.yhgfb-cn-static.com",
-      "mssdk.bytedance.com"
+      "mssdk.bytedance.com",
+      "lf-rc1.yhgfb-cn-static.com",
+      "lf-cdn-tos.bytescm.com",
+      "lf3-cdn-tos.bytescm.com",
+      "lf6-cdn-tos.bytescm.com",
+      "lf-luna.qishui.com",
+      "auth.zijieapi.com"
     ]
   },
   "navigation": [

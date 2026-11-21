@@ -1,5 +1,7 @@
 /** 在独立网页登录会话中加载汽水官方安全 SDK、显示专用二维码并等待平台签发 Cookie。 */
 import { qrSource } from './vendor/qr-source.js';
+import { verificationRuntime } from './vendor/verification-runtime.js';
+import { verificationChallenge, verifyInBrowser } from './login-verification.js';
 
 function browserLogin(device) {
   const api = 'https://api.qishui.com';
@@ -17,6 +19,7 @@ function browserLogin(device) {
   const portrait = uuid() + '.login';
   document.cookie = 'biz_trace_id=' + trace + ';path=/;Secure;SameSite=Lax';
   let sourceInfo = '';
+  let verificationMs = 0;
   async function request(path, fields, body, json = false) {
     const url = new URL(path, api);
     if (fields) for (const [key, value] of Object.entries(fields)) url.searchParams.set(key, value);
@@ -44,6 +47,29 @@ function browserLogin(device) {
       throw problem('汽水' + stage + '失败（错误码：' + (Number.isSafeInteger(code) ? code : '未提供') + '）');
     }
     return value.data;
+  }
+  async function verifiedRequest(path, fields, body, stage) {
+    const value = await request(path, fields, body);
+    const challenge = verificationChallenge(value);
+    if (!challenge) return checked(value, stage);
+    const began = Date.now();
+    image.hidden = true;
+    label.textContent = '请在当前窗口完成汽水官方安全验证，完成后继续同一次登录';
+    const fp = await verifyInBrowser({ ...challenge, device, portrait });
+    verificationMs += Date.now() - began;
+    const nextFields = { ...fields, isResend: 'true', ...(fp ? { fp, verifyFp: fp } : {}) };
+    let nextBody = body;
+    if (challenge.body && typeof challenge.body === 'object' && !Array.isArray(challenge.body)) {
+      const params = new URLSearchParams(body == null ? nextFields : body);
+      for (const [key, item] of Object.entries(challenge.body)) params.set(key, typeof item === 'object' ? JSON.stringify(item) : String(item));
+      if (body == null) Object.assign(nextFields, Object.fromEntries(params)); else nextBody = params.toString();
+    }
+    const resumed = await request(path, nextFields, nextBody);
+    if (verificationChallenge(resumed)) throw problem('汽水完成验证后仍要求额外验证（2046），请稍后重新登录');
+    const data = checked(resumed, stage);
+    image.hidden = !image.src;
+    label.textContent = '安全验证已完成，正在等待汽水确认登录…';
+    return data;
   }
   async function loadSDK() {
     await new Promise((resolve, reject) => {
@@ -79,27 +105,29 @@ function browserLogin(device) {
       account_sdk_source: 'web', language: 'zh', is_new_login: '1', is_from_iesaccountsaas: '1', device_platform: 'PC', version_code: '3.7.0',
       device_id: device.id, did: device.id, install_id: device.install, iid: device.install, biz_trace_id: trace, p_js_v: '2.4.13', p_js_t: 'pro', p_ver: '1.0.29' };
     const extra = { next: api, need_logo: 'false', need_short_url: 'false', is_new_login: '1' };
-    const data = checked(await request('/passport/web/get_qrcode/', { ...common, ...extra }), '取码');
+    const data = await verifiedRequest('/passport/web/get_qrcode/', { ...common, ...extra }, undefined, '取码');
     const original = new URL(data.qrcode_index_url);
     const token = original.searchParams.get('token');
     if (original.origin !== 'https://bff-pc.qishui.com' || !token || typeof data.token !== 'string') throw problem('汽水返回的二维码无效');
     const scan = new URL('https://bff-pc.qishui.com/light/invoke/scan_login');
-    scan.search = String(new URLSearchParams({ token, os: 'Windows', computer_name: 'MB iOS' })).replace(/\+/g, '%20');
+    scan.search = String(new URLSearchParams({ token, os: 'Windows', computer_name: device.name })).replace(/\+/g, '%20');
     const qr = qrcode(0, 'M'); qr.addData(scan.href); qr.make(); image.src = qr.createDataURL(6, 12); image.hidden = false;
     label.textContent = '请用汽水音乐 App 扫码并确认';
     const body = String(new URLSearchParams({ ...extra, is_frontier: 'true', token: data.token }));
-    const deadline = Date.now() + 210000;
+    let deadline = Date.now() + 210000;
     let disconnects = 0;
     while (Date.now() < deadline) {
       await delay(2000); await visible();
       if (Date.now() >= deadline) break;
       let result;
-      try { result = await request('/passport/web/check_qrconnect/', common, body); disconnects = 0; }
+      const verifiedBefore = verificationMs;
+      try { result = await verifiedRequest('/passport/web/check_qrconnect/', common, body, '扫码确认'); disconnects = 0; }
       catch (error) {
         if (!(error instanceof TypeError || error.name === 'AbortError') || ++disconnects > 2) throw error;
         await visible(); continue;
       }
-      const state = String(checked(result, '扫码确认')?.status);
+      deadline += verificationMs - verifiedBefore;
+      const state = String(result?.status);
       if (state === 'confirmed' || state === '3') { label.textContent = '登录已确认，正在读取账号…'; image.hidden = true; return; }
       if (state === 'scanned' || state === '2') label.textContent = '已扫码，请在汽水音乐确认';
       else if (state !== 'new' && state !== '1') throw problem('汽水二维码已失效，请重新登录');
@@ -115,9 +143,11 @@ function browserLogin(device) {
 }
 
 export function loginHTML(device) {
-  const input = JSON.stringify({ id: device.id, install: device.install }).replace(/</g, '\\u003c');
+  const name = globalThis.host?.platform === 'android' ? 'MB Android' : globalThis.host?.platform === 'ios' ? 'MB iOS' : 'MB';
+  const input = JSON.stringify({ id: device.id, install: device.install, name }).replace(/</g, '\\u003c');
   return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<title>登录汽水音乐</title><style>:root{color-scheme:light dark;font-family:system-ui}body{margin:0;padding:24px;text-align:center}#qr{width:min(100%,320px);image-rendering:pixelated;background:white}p{line-height:1.6}</style></head>' +
     '<body><p id="status">正在连接汽水官方登录组件…</p><img id="qr" hidden alt="汽水音乐登录二维码">' +
-    '<script>' + qrSource.replace(/<\/script/gi, '<\\/script') + '</script><script>(' + browserLogin.toString() + ')(' + input + ');</script></body></html>';
+    '<script>' + (qrSource + '\n' + verificationRuntime).replace(/<\/script/gi, '<\\/script') + '</script><script>' +
+    verificationChallenge.toString() + '\n' + verifyInBrowser.toString() + '\n(' + browserLogin.toString() + ')(' + input + ');</script></body></html>';
 }
