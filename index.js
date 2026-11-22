@@ -721,3 +721,47 @@ export async function browse({ page }) {
   }
   throw fail('没有这个页面');
 }
+
+// 歌手目录沿用 PC 客户端公开合同；游标按账号代次隔离，避免切换账号后续页串用。
+const artistCursors = new Map();
+async function artistRequest(path, query) {
+  const device = host.storage.get(DEVICE_KEY);
+  if (!accountID(device?.id) || !accountID(device?.install)) throw loginRequired();
+  // 作者元数据是公开请求，不携带账号 Cookie；客户端参数复用已验证的 PC 合同。
+  return accountRequest(path, {
+    aid: APP_ID, app_name: 'luna_pc', region: 'cn', geo_region: 'cn', os_region: 'cn', sim_region: '',
+    device_id: device.id, iid: device.install, cdid: '', fp: device.id, version_name: CLIENT_VERSION, version_code: '30070000',
+    channel: 'official', build_mode: 'master', network_carrier: '', ac: 'wifi', tz_name: 'Asia/Shanghai', resolution: '',
+    device_platform: 'windows', device_type: 'Windows', os_version: 'Windows 10', ...query,
+  }, [], { headers: { 'User-Agent': 'LunaPC/3.7.0(452316191)', 'Accept-Encoding': 'identity',
+    'X-Luna-Background-Type': 'foreground', 'X-Luna-Is-Background-Req': '0', 'X-Luna-Is-Local-User': '0' } });
+}
+export async function artist({ id, offset = 0 }) {
+  id = accountID(id);
+  if (!id || !Number.isSafeInteger(offset) || offset < 0) throw fail('无效的歌手或分页位置');
+  return withLibrary(async () => {
+    const key = `${accountRevision}:${id}`;
+    const cursor = offset ? artistCursors.get(`${key}:${offset}`) : '';
+    if (cursor == null) throw fail('歌手分页已过期，请重新打开主页');
+    const path = `/luna/pc/artists/${id}`;
+    const detail = await artistRequest(path, { locate_item_id: '' });
+    if (accountID(detail.artist_info?.id) !== id || !detail.artist_info.name) throw fail('汽水音乐歌手资料无效');
+    const listed = await artistRequest(path + '/tracks', { cursor, count: '50', sort_type: '0' });
+    if (!Array.isArray(listed.tracks)) throw fail('汽水音乐歌手作品响应无效');
+    const tracks = listed.tracks.map(song);
+    const next = String(listed.next_cursor ?? '');
+    const more = listed.has_more === true;
+    if (more && (!tracks.length || !next || next === '0' || next === cursor)) throw fail('汽水音乐歌手分页未前进');
+    if (artistCursors.size > 256) artistCursors.clear();
+    if (more) artistCursors.set(`${key}:${offset + tracks.length}`, next);
+    let albums = [];
+    if (offset === 0) {
+      try {
+        const list = await artistRequest(path + '/albums', { cursor: '', count: '50' });
+        if (Array.isArray(list.albums)) albums = list.albums.map(a => ({ id: String(a.id), name: a.name || '', imageUrl: image(a.url_cover) }));
+      } catch (error) { if (['signIn', 'verify', 'cancelled'].includes(error.code)) throw error; }
+    }
+    const info = detail.artist_info;
+    return { artist: { id, name: info.name, imageUrl: image(info.url_avatar), description: info.description || info.intro || '' }, tracks, albums, more };
+  });
+}

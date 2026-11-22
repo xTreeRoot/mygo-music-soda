@@ -470,3 +470,25 @@ test('browser failures and late completion after cancellation preserve the previ
     assert.deepEqual(requests.map(item => item.url.pathname), [devicePath]);
   }
 });
+
+test('artist entry loads the PC artist contract, follows cursors and rejects stale account continuations', async context => {
+  fastPolling(context);
+  const { reply } = accountFixture();
+  const base = '/luna/pc/artists/92';
+  reply.set(base, (url, options) => { assert.equal(options.headers.Cookie, undefined); assert.equal(url.searchParams.get('app_name'), 'luna_pc'); return response({ artist_info: { id: '92', name: 'Artist', url_avatar: { urls: ['https://cover.test/avatar'] } } }); });
+  reply.set(base + '/tracks', url => {
+    const next = url.searchParams.get('cursor') === 'next';
+    return response({ tracks: [{ id: next ? '102' : '101', name: 'Song', artists: [{ id: '92', name: 'Artist' }] }], has_more: !next, next_cursor: next ? '0' : 'next' });
+  });
+  reply.set(base + '/albums', () => response({ status_code: 500 }));
+  const plugin = await import(`./index.js?test=${++sequence}`);
+  await plugin.signIn();
+  const first = await plugin.artist({ id: '92' });
+  assert.equal(first.artist.id, '92'); assert.equal(first.more, true);
+  assert.equal(first.tracks[0].artists[0].id, '92'); assert.deepEqual(first.albums, []);
+  const next = await plugin.artist({ id: '92', offset: 1 });
+  assert.equal(next.tracks[0].id, '102'); assert.equal(next.more, false);
+  await assert.rejects(plugin.artist({ id: '../92' }), { code: 'unavailable' });
+  plugin.signOut();
+  await assert.rejects(plugin.artist({ id: '92', offset: 1 }), { code: 'signIn' });
+});
