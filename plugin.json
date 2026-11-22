@@ -1,7 +1,7 @@
 {
   "id": "soda",
   "name": "汽水音乐",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "minAppVersion": "0.1.27",
   "main": "index.js",
   "playback": "stream",
@@ -32,6 +32,23 @@
       "icon": "note"
     },
     {
+      "title": "喜欢的歌曲",
+      "builtin": "liked"
+    }
+  ],
+  "discovery": [
+    {
+      "id": "recommended",
+      "title": "精选歌单",
+      "page": "recommended"
+    },
+    {
+      "id": "categories",
+      "title": "风格与场景",
+      "page": "categories"
+    },
+    {
+      "id": "liked",
       "title": "喜欢的歌曲",
       "builtin": "liked"
     }
