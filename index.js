@@ -1,4 +1,5 @@
 import { loginHTML } from './login-page.js';
+import { playbackResource } from './playback.js';
 
 const API = 'https://beta-luna.douyin.com';
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
@@ -620,32 +621,19 @@ async function detail(id) {
 }
 
 export async function stream({ id, quality }) {
-  const data = await detail(id);
-  let model;
-  try { model = JSON.parse(data.track_player?.video_model || '{}') || {}; }
-  catch (_) { throw fail('汽水音乐返回了无效的播放信息'); }
-  const fullDuration = Number(data.seo_track?.track?.duration || 0);
-  const availableDuration = Number(model.video_duration || 0) * 1000;
-  if (fullDuration > 0 && availableDuration + 2000 < fullDuration) {
-    throw fail('这首歌当前只提供试听片段，请在汽水音乐客户端中播放');
+  id = String(id);
+  if (!/^\d+$/.test(id)) throw fail('歌曲 ID 无效');
+  const data = storedAccount()?.active && globalThis.host?.capabilities?.cencAudio === true ? await withLibrary(async (_, jar) => {
+    // 已核对的官方 GetTrack 合同；会员会话必须参与本次播放授权。
+    const result = await accountRequest('/luna/track', { aid: APP_ID, track_id: id, media_type: 'track', device_platform: 'web' }, jar);
+    if (String(result.track?.id) !== id) throw fail('汽水音乐返回的歌曲与请求不一致');
+    return result;
+  }) : await detail(id);
+  if (data.lyric?.content) {
+    if (lyricsCache.size >= 32 && !lyricsCache.has(id)) lyricsCache.delete(lyricsCache.keys().next().value);
+    lyricsCache.set(id, { content: data.lyric.content, until: Date.now() + 60000 });
   }
-  const variants = Object.values(model.video_list || {}).filter(v => {
-    const meta = v?.video_meta || {};
-    const url = v?.main_url;
-    return meta.codec_type === 'aac' && ['aac', 'm4a'].includes(meta.vtype) &&
-      typeof url === 'string' && /^https:\/\/(?:[a-z0-9-]+\.)+douyinvod\.com\//i.test(url) && !/[\x00-\x20\x7f\\]/.test(url);
-  });
-  variants.sort((a, b) => Number(a.video_meta.bitrate || 0) - Number(b.video_meta.bitrate || 0));
-  if (!variants.length) throw fail('这首歌暂时没有可用的 AAC 音频');
-  const selected = quality === 'standard' ? variants[0] : variants[variants.length - 1];
-  return {
-    url: selected.main_url,
-    type: selected.video_meta.vtype === 'aac' ? 'aac' : 'm4a',
-    size: Number(selected.video_meta.size || 0),
-    bitRate: Number(selected.video_meta.bitrate || 0),
-    quality: quality === 'standard' ? 'standard' : 'high',
-    headers: { 'User-Agent': WEB_UA },
-  };
+  return playbackResource(data, quality, WEB_UA);
 }
 
 export async function lyrics({ id }) {

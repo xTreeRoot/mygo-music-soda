@@ -1,12 +1,12 @@
 {
   "name": "mygo-music-soda",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "private": true,
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "check": "node --check index.js && node --check login-page.js && node --check login-verification.js",
+    "check": "node --check index.js && node --check playback.js && node --check login-page.js && node --check login-verification.js",
     "pack": "python3 pack.py",
-    "test": "node --test index.test.mjs login-page.test.mjs"
+    "test": "node --test index.test.mjs login-page.test.mjs playback.test.mjs"
   }
 }
