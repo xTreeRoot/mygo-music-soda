@@ -166,7 +166,7 @@ function accountFixture() {
     platform: 'ios',
     crypto: { md5: value => createHash('md5').update(value).digest('hex') },
     signInPrompt: value => prompts.push(value),
-    storage: { get: key => storage.get(key), set: (key, value) => storage.set(key, structuredClone(value)) },
+    storage: { get: key => storage.get(key), set: (key, value) => storage.set(key, structuredClone(value)), remove: key => storage.delete(key) },
   };
   globalThis.fetch = async (address, options) => {
     const url = new URL(address);
@@ -491,4 +491,40 @@ test('artist entry loads the PC artist contract, follows cursors and rejects sta
   await assert.rejects(plugin.artist({ id: '../92' }), { code: 'unavailable' });
   plugin.signOut();
   await assert.rejects(plugin.artist({ id: '92', offset: 1 }), { code: 'signIn' });
+});
+
+
+test('explicit logout clears only session and login registration then requires a new QR after reload', async context => {
+  fastPolling(context);
+  const { storage, requests } = accountFixture();
+  const plugin = await import(`./index.js?test=${++sequence}`);
+  await plugin.signIn();
+  storage.set('user-preferences', { quality: 'high' });
+  plugin.signOutAndClearCache();
+  assert.equal(storage.has('qishuiAccount'), false);
+  assert.equal(storage.has('qishuiDevice'), false);
+  assert.deepEqual(storage.get('user-preferences'), { quality: 'high' });
+  const reopened = await import(`./index.js?test=${++sequence}`);
+  requests.length = 0;
+  assert.equal(await reopened.account(), null);
+  assert.equal(requests.length, 0);
+  await reopened.signIn();
+  assert.deepEqual(requests.map(item => item.url.pathname), [devicePath, qrPath, pollPath, mePath]);
+});
+
+test('clearing login prevents a pending profile from restoring saved credentials', async context => {
+  fastPolling(context);
+  const { storage, reply } = accountFixture();
+  const plugin = await import(`./index.js?test=${++sequence}`);
+  await plugin.signIn();
+  let requested, complete;
+  const started = new Promise(resolve => { requested = resolve; });
+  reply.set(mePath, () => { requested(); return new Promise(resolve => { complete = resolve; }); });
+  const pending = plugin.account();
+  await started;
+  plugin.signOutAndClearCache();
+  complete(response({ my_info: { id: fixtureAccount, nickname: 'late' } }));
+  assert.equal(await pending, null);
+  assert.equal(storage.has('qishuiAccount'), false);
+  assert.equal(storage.has('qishuiDevice'), false);
 });

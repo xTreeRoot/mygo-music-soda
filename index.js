@@ -372,6 +372,16 @@ export function signOut() {
   if (saved) host.storage.set(SESSION_KEY, { ...saved, active: false });
 }
 
+/** 用户主动重新扫码时清除本插件会话和设备注册，不触碰其他设置或资料。 */
+export function signOutAndClearCache() {
+  signOut();
+  host.storage.remove(SESSION_KEY);
+  host.storage.remove(DEVICE_KEY);
+  pendingDetails.clear();
+  lyricsCache.clear();
+  artistCursors.clear();
+}
+
 async function withLibrary(load) {
   const saved = storedAccount();
   if (!saved?.active || !sessionPresent(saved.cookies)) throw loginRequired();
