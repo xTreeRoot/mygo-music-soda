@@ -26,6 +26,7 @@ const LOGIN_MS = 210000;
 const PAGE_SIZE = 50;
 let loginAttempt;
 let accountRevision = 0;
+let stagedSession;
 
 function fail(message) {
   const error = new Error(message);
@@ -161,10 +162,13 @@ function storedAccount() {
   return stored?.version === 1 && accountID(stored.id) && Array.isArray(stored.cookies) && stored.cookies.length <= 128 ? stored : null;
 }
 
+function libraryCookie(cookie) {
+  return typeof cookie?.name === 'string' && !cookie.name.startsWith('passport_csrf_') &&
+    [ACCOUNT_PATH, LIBRARY_PATH, PRIVATE_DETAIL_PATH].some(path => cookieApplies(cookie, path));
+}
+
 function saveAccount(profile, cookies, active) {
-  const forLibrary = cookies.filter(cookie => !cookie.name.startsWith('passport_csrf_') &&
-    [ACCOUNT_PATH, LIBRARY_PATH, PRIVATE_DETAIL_PATH].some(path => cookieApplies(cookie, path)));
-  host.storage.set(SESSION_KEY, { version: 1, id: profile.id, cookies: forLibrary, active });
+  host.storage.set(SESSION_KEY, { version: 1, id: profile.id, cookies: cookies.filter(libraryCookie), active });
 }
 
 async function verifiedProfile(jar, signal) {
@@ -315,6 +319,7 @@ async function scanQR(attempt, jar) {
 export function cancelSignIn() {
   loginAttempt?.controller.abort();
   loginAttempt = undefined;
+  stagedSession = undefined;
 }
 
 export async function signIn() {
@@ -364,6 +369,67 @@ export async function account() {
     host.storage.set(SESSION_KEY, { ...saved, active: false });
     return null;
   }
+}
+
+function transferableJar(cookies) {
+  if (!Array.isArray(cookies) || cookies.length > 128) return null;
+  const jar = [];
+  const scopes = new Set();
+  for (const cookie of cookies) {
+    if (!libraryCookie(cookie) || cookie.value.length > 8192 ||
+        (cookie.expires != null && !Number.isSafeInteger(cookie.expires))) return null;
+    const { name, value, domain, path, expires } = cookie;
+    const scope = JSON.stringify([name, domain, path]);
+    if (scopes.has(scope)) return null;
+    scopes.add(scope);
+    jar.push({ name, value, domain, path, ...(expires == null ? {} : { expires }) });
+  }
+  return sessionPresent(jar) && JSON.stringify(jar).length <= 90_000 ? jar : null;
+}
+
+export async function exportSession() {
+  const saved = storedAccount();
+  const cookies = saved?.active && transferableJar(saved.cookies.filter(libraryCookie));
+  if (!cookies || loginAttempt) throw loginRequired();
+  const revision = accountRevision;
+  const profile = await verifiedProfile(cookies);
+  if (revision !== accountRevision || loginAttempt || profile.id !== saved.id) throw loginRequired();
+  const verified = transferableJar(cookies.filter(libraryCookie));
+  if (!verified) throw loginRequired();
+  saveAccount(profile, verified, true);
+  return { format: 1, account_id: profile.id, account_label: profile.name, session: { cookies: verified } };
+}
+
+export async function validateSession(input) {
+  stagedSession = undefined;
+  if (input?.format !== 1 || accountID(input.account_id) !== input.account_id || loginAttempt || storedAccount()?.active) return null;
+  const jar = transferableJar(input.session?.cookies);
+  if (!jar) return null;
+  const candidate = { revision: accountRevision, input: JSON.stringify(jar) };
+  stagedSession = candidate;
+  try {
+    const profile = await verifiedProfile(jar);
+    if (stagedSession !== candidate || accountRevision !== candidate.revision || profile.id !== input.account_id) return null;
+    candidate.verified = { profile, jar };
+    return profile;
+  } catch (error) {
+    if (stagedSession !== candidate || error.code === 'signIn') return null;
+    throw error;
+  } finally {
+    if (!candidate.verified && stagedSession === candidate) stagedSession = undefined;
+  }
+}
+
+export function commitSession(input) {
+  const candidate = stagedSession;
+  stagedSession = undefined;
+  if (!candidate?.verified || candidate.revision !== accountRevision || storedAccount()?.active || loginAttempt || input?.format !== 1) return null;
+  const { profile, jar } = candidate.verified;
+  if (input.account_id !== profile.id || input.account?.id !== profile.id || !sessionPresent(jar) ||
+      JSON.stringify(transferableJar(input.session?.cookies)) !== candidate.input) return null;
+  saveAccount(profile, jar, true);
+  accountRevision++;
+  return profile;
 }
 
 export function signOut() {

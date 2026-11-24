@@ -245,6 +245,71 @@ test('logout stays disabled across reload, and login checks saved credentials on
   assert.equal(storage.get('qishuiAccount').active, false);
 });
 
+test('a second installation restores the verified account and reads its private library without scanning', async context => {
+  fastPolling(context);
+  accountFixture();
+  const desktop = await import(`./index.js?test=${++sequence}`);
+  await desktop.signIn();
+  const input = JSON.parse(JSON.stringify(await desktop.exportSession()));
+  assert.deepEqual(Object.keys(input.session), ['cookies']);
+
+  const phone = accountFixture();
+  const mobile = await import(`./index.js?test=${++sequence}`);
+  phone.reply.set(mePath, (_, options) => {
+    assert.equal(options.headers.Cookie, 'sessionid=fixture-session');
+    return response({ my_info: { id: fixtureAccount, nickname: 'Verified' } }, {
+      cookies: ['sessionid=fixture-renewed; Path=/; Secure; HttpOnly'],
+    });
+  });
+  phone.reply.set(libraryPath, (_, options) => {
+    assert.equal(options.headers.Cookie, 'sessionid=fixture-renewed');
+    return response({ playlists: [{ id: fixtureList, title: 'Private', owner: { id: fixtureAccount } }], has_more: false });
+  });
+  assert.equal(await mobile.account(), null);
+  const verified = await mobile.validateSession(input);
+  assert.equal(verified.id, fixtureAccount);
+  assert.equal(phone.storage.size, 0);
+  assert.equal(mobile.commitSession({ ...input, account: verified }).id, fixtureAccount);
+  assert.equal(phone.storage.has('qishuiDevice'), false);
+  assert.equal((await mobile.playlists())[0].id, `account:${fixtureList}`);
+  assert.deepEqual(phone.requests.map(request => request.url.pathname), [mePath, libraryPath]);
+  assert.deepEqual(phone.prompts, []);
+});
+
+test('an expired, foreign, or cancelled session cannot change installed account state', async context => {
+  fastPolling(context);
+  const { storage, requests, reply } = accountFixture();
+  const plugin = await import(`./index.js?test=${++sequence}`);
+  await plugin.signIn();
+  const input = await plugin.exportSession();
+  const before = structuredClone(storage.get('qishuiAccount'));
+  assert.equal(await plugin.validateSession(input), null);
+  assert.deepEqual(storage.get('qishuiAccount'), before);
+
+  reply.set(mePath, () => response({ status_code: 1000016 }));
+  await assert.rejects(plugin.exportSession(), { code: 'signIn' });
+  assert.deepEqual(storage.get('qishuiAccount'), before);
+  plugin.signOut();
+  await assert.rejects(plugin.exportSession(), { code: 'signIn' });
+  const inactive = structuredClone(storage.get('qishuiAccount'));
+  requests.length = 0;
+  const malformed = structuredClone(input);
+  malformed.session.cookies[0].domain = 'outside.test';
+  assert.equal(await plugin.validateSession(malformed), null);
+  assert.equal(requests.length, 0);
+
+  reply.set(mePath, () => response({ my_info: { id: '2', nickname: 'Other' } }));
+  assert.equal(await plugin.validateSession(input), null);
+  assert.equal(plugin.commitSession({ ...input, account: { id: fixtureAccount } }), null);
+  reply.set(mePath, () => response({ status_code: 1000016 }));
+  assert.equal(await plugin.validateSession(input), null);
+  reply.set(mePath, () => response({ my_info: { id: fixtureAccount, nickname: 'Verified' } }));
+  const verified = await plugin.validateSession(input);
+  plugin.signOut();
+  assert.equal(plugin.commitSession({ ...input, account: verified }), null);
+  assert.deepEqual(storage.get('qishuiAccount'), inactive);
+});
+
 test('app-switch disconnects recover the same QR, pending cookies and verified profile', async context => {
   const timer = globalThis.setTimeout;
   context.mock.method(globalThis, 'setTimeout', (callback, ms) => timer(callback, ms <= 2000 ? 0 : ms));
