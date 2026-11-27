@@ -606,6 +606,8 @@ test('platform playlist append validates ownership, preserves int64 strings and 
   assert.equal(options.headers['X-SS-STUB'],createHash('md5').update(options.body).digest('hex').toUpperCase());return response({status_code:0});
  });
  await plugin.addToPlaylist({id:`account:${fixtureList}`,trackIds:[fixtureTrack,fixtureTrack]});assert.equal(writes,1);
+ reply.set(libraryPath+'/media/delete',(_,options)=>{assert.equal(options.method,'POST');assert.deepEqual(JSON.parse(options.body),{playlist_id:fixtureList,media:[{id:fixtureTrack,type:'track'}]});return response({status_code:0});});
+ await plugin.removeFromPlaylist({id:`account:${fixtureList}`,trackIds:[fixtureTrack]});
  for(const id of ['account:32','account:31','account:999'])await assert.rejects(plugin.addToPlaylist({id,trackIds:[fixtureTrack]}),/本人/);
  assert.equal(writes,1);
  reply.set(libraryPath+'/media/append',()=>{writes++;throw Error('ambiguous');});

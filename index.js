@@ -552,7 +552,7 @@ export async function liked({ offset = 0 } = {}) {
 }
 
 // MAppendPlaylistMedia 的 JSON 合同来自官方 PC 客户端；写操作不自动重放。
-export async function addToPlaylist({ id, trackIds }) {
+async function changePlatformPlaylist({ id, trackIds }, add) {
   const playlistID = typeof id === 'string' && id.startsWith('account:') ? accountID(id.slice(8)) : '';
   if (!playlistID || !Array.isArray(trackIds) || !trackIds.length || trackIds.length > 1000 || trackIds.some(value => !accountID(value))) {
     throw fail('平台歌单或歌曲编号无效');
@@ -566,7 +566,7 @@ export async function addToPlaylist({ id, trackIds }) {
     const device = host.storage.get(DEVICE_KEY);
     if (!accountID(device?.id) || !accountID(device?.install)) throw loginRequired();
     const body = JSON.stringify({ playlist_id: playlistID, media: ids.map(value => ({ id: value, type: 'track' })) });
-    await accountRequest(LIBRARY_PATH + '/media/append', {
+    await accountRequest(LIBRARY_PATH + '/media/' + (add ? 'append' : 'delete'), {
       aid: APP_ID, app_name: 'luna_pc', region: 'cn', geo_region: 'cn', os_region: 'cn', sim_region: '',
       device_id: device.id, iid: device.install, cdid: '', fp: device.id, version_name: CLIENT_VERSION, version_code: '30070000',
       channel: 'official', build_mode: 'master', network_carrier: '', ac: 'wifi', tz_name: 'Asia/Shanghai', resolution: '',
@@ -576,6 +576,9 @@ export async function addToPlaylist({ id, trackIds }) {
       'X-Luna-Is-Background-Req': '0', 'X-Luna-Is-Local-User': '0' } });
   });
 }
+
+export function addToPlaylist(input) { return changePlatformPlaylist(input, true); }
+export function removeFromPlaylist(input) { return changePlatformPlaylist(input, false); }
 
 async function request(path, body) {
   const response = await fetch(API + path, {
