@@ -593,3 +593,21 @@ test('clearing login prevents a pending profile from restoring saved credentials
   assert.equal(storage.has('qishuiAccount'), false);
   assert.equal(storage.has('qishuiDevice'), false);
 });
+
+test('platform playlist append validates ownership, preserves int64 strings and never retries a write', async context => {
+ fastPolling(context);
+ const {reply}=accountFixture();
+ const plugin=await import(`./index.js?test=${++sequence}`);await plugin.signIn();
+ reply.set(libraryPath,()=>response({playlists:[{id:fixtureList,title:'Mine',type:2,owner:{id:fixtureAccount}},{id:'32',title:'Other',type:2,owner:{id:'100'}},{id:'31',title:'Liked',type:1,owner:{id:fixtureAccount}}],has_more:false}));
+ let writes=0;
+ reply.set(libraryPath+'/media/append',(_,options)=>{
+  writes++;assert.equal(options.method,'POST');assert.equal(options.headers.Cookie,'sessionid=fixture-session');
+  const body=JSON.parse(options.body);assert.deepEqual(body,{playlist_id:fixtureList,media:[{id:fixtureTrack,type:'track'}]});
+  assert.equal(options.headers['X-SS-STUB'],createHash('md5').update(options.body).digest('hex').toUpperCase());return response({status_code:0});
+ });
+ await plugin.addToPlaylist({id:`account:${fixtureList}`,trackIds:[fixtureTrack,fixtureTrack]});assert.equal(writes,1);
+ for(const id of ['account:32','account:31','account:999'])await assert.rejects(plugin.addToPlaylist({id,trackIds:[fixtureTrack]}),/本人/);
+ assert.equal(writes,1);
+ reply.set(libraryPath+'/media/append',()=>{writes++;throw Error('ambiguous');});
+ await assert.rejects(plugin.addToPlaylist({id:`account:${fixtureList}`,trackIds:[fixtureTrack]}));assert.equal(writes,2);
+});

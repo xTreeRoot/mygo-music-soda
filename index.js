@@ -551,6 +551,32 @@ export async function liked({ offset = 0 } = {}) {
   });
 }
 
+// MAppendPlaylistMedia 的 JSON 合同来自官方 PC 客户端；写操作不自动重放。
+export async function addToPlaylist({ id, trackIds }) {
+  const playlistID = typeof id === 'string' && id.startsWith('account:') ? accountID(id.slice(8)) : '';
+  if (!playlistID || !Array.isArray(trackIds) || !trackIds.length || trackIds.length > 1000 || trackIds.some(value => !accountID(value))) {
+    throw fail('平台歌单或歌曲编号无效');
+  }
+  const ids = [...new Set(trackIds.map(accountID))];
+  return withLibrary(async (owner, jar) => {
+    const revision = accountRevision;
+    const row = (await libraryRows(jar)).get(playlistID);
+    if (!row || accountID(row.owner?.id) !== owner || ![2, 3, 11].includes(Number(row.type))) throw fail('只能添加到本人创建的普通汽水歌单');
+    if (revision !== accountRevision) throw loginRequired();
+    const device = host.storage.get(DEVICE_KEY);
+    if (!accountID(device?.id) || !accountID(device?.install)) throw loginRequired();
+    const body = JSON.stringify({ playlist_id: playlistID, media: ids.map(value => ({ id: value, type: 'track' })) });
+    await accountRequest(LIBRARY_PATH + '/media/append', {
+      aid: APP_ID, app_name: 'luna_pc', region: 'cn', geo_region: 'cn', os_region: 'cn', sim_region: '',
+      device_id: device.id, iid: device.install, cdid: '', fp: device.id, version_name: CLIENT_VERSION, version_code: '30070000',
+      channel: 'official', build_mode: 'master', network_carrier: '', ac: 'wifi', tz_name: 'Asia/Shanghai', resolution: '',
+      device_platform: 'windows', device_type: 'Windows', os_version: 'Windows 10',
+    }, jar, { body, headers: { 'Content-Type': 'application/json; charset=utf-8', 'User-Agent': 'LunaPC/3.7.0(452316191)',
+      'X-SS-STUB': host.crypto.md5(body).toUpperCase(), 'X-Luna-Background-Type': 'foreground',
+      'X-Luna-Is-Background-Req': '0', 'X-Luna-Is-Local-User': '0' } });
+  });
+}
+
 async function request(path, body) {
   const response = await fetch(API + path, {
     method: body === undefined ? 'GET' : 'POST',

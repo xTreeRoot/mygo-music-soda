@@ -1,7 +1,7 @@
 {
   "id": "soda",
   "name": "汽水音乐",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "minAppVersion": "0.1.27",
   "main": "index.js",
   "playback": "stream",
